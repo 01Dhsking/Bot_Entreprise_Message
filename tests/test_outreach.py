@@ -3,6 +3,7 @@ from pydantic import SecretStr
 from enterprise_message_bot import outreach
 from enterprise_message_bot.outreach import (
     build_evolution_api_request,
+    encode_json_ascii,
     extract_primary_email,
     normalize_benin_phone,
     render_template,
@@ -47,3 +48,16 @@ def test_build_evolution_api_request(monkeypatch) -> None:
         "delay": 123,
         "linkPreview": True,
     }
+
+
+def test_encode_json_ascii_preserves_accents_as_escapes() -> None:
+    encoded = encode_json_ascii(
+        {
+            "number": "22994482118",
+            "text": "Beaucoup d\u2019entreprises \u00e0 Cotonou",
+        }
+    )
+
+    assert encoded.isascii()
+    assert "\\u2019" in encoded
+    assert "\\u00e0" in encoded

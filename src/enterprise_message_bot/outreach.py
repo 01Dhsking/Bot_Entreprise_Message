@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import smtplib
 from email.message import EmailMessage
@@ -155,10 +156,14 @@ def build_evolution_api_request(recipient: str, body: str) -> tuple[str, dict, d
     return endpoint, headers, payload
 
 
+def encode_json_ascii(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
 async def _send_evolution_api(recipient: str, body: str) -> str:
     endpoint, headers, payload = build_evolution_api_request(recipient, body)
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(endpoint, headers=headers, json=payload)
+        response = await client.post(endpoint, headers=headers, content=encode_json_ascii(payload))
         response.raise_for_status()
         data = response.json()
     key = data.get("key") if isinstance(data, dict) else None
