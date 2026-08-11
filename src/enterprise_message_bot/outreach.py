@@ -41,11 +41,16 @@ def normalize_benin_phone(raw_value: str | None) -> str | None:
     country_code = settings.phone_country_code
     national_prefix = settings.phone_national_prefix
     if len(digits) == 8:
-        return f"{country_code}{national_prefix}{digits}"
-    if len(digits) == 10 and digits.startswith(national_prefix):
         return f"{country_code}{digits}"
+    if len(digits) == 10 and digits.startswith(national_prefix):
+        return f"{country_code}{digits[len(national_prefix) :]}"
     if len(digits) == len(country_code) + 8 and digits.startswith(country_code):
-        return f"{country_code}{national_prefix}{digits[len(country_code) :]}"
+        return digits
+    if (
+        len(digits) == len(country_code) + 10
+        and digits.startswith(f"{country_code}{national_prefix}")
+    ):
+        return f"{country_code}{digits[len(country_code) + len(national_prefix) :]}"
     if digits.startswith(country_code) and len(digits) >= len(country_code) + 10:
         return digits
     return None
@@ -143,11 +148,9 @@ def build_evolution_api_request(recipient: str, body: str) -> tuple[str, dict, d
     }
     payload = {
         "number": recipient,
-        "textMessage": {"text": body},
+        "text": body,
         "delay": settings.evolution_api_delay_ms,
-        "quoted": {},
         "linkPreview": settings.evolution_api_link_preview,
-        "mentioned": [],
     }
     return endpoint, headers, payload
 

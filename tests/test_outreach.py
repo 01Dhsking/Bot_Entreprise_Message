@@ -15,8 +15,9 @@ def test_extract_first_email_from_concatenated_source_value() -> None:
 
 
 def test_normalize_legacy_benin_phone() -> None:
-    assert normalize_benin_phone("96 95 29 07") == "2290196952907"
-    assert normalize_benin_phone("+229 01 96 95 29 07") == "2290196952907"
+    assert normalize_benin_phone("96 95 29 07") == "22996952907"
+    assert normalize_benin_phone("01 96 95 29 07") == "22996952907"
+    assert normalize_benin_phone("+229 01 96 95 29 07") == "22996952907"
 
 
 def test_render_message_template() -> None:
@@ -42,9 +43,7 @@ def test_build_evolution_api_request(monkeypatch) -> None:
     assert headers["apikey"] == "secret"
     assert payload == {
         "number": "2290190000000",
-        "textMessage": {"text": "Bonjour"},
+        "text": "Bonjour",
         "delay": 123,
-        "quoted": {},
         "linkPreview": True,
-        "mentioned": [],
     }
