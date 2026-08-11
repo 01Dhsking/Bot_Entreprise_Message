@@ -1,0 +1,117 @@
+# Bot Entreprise Message
+
+Serveur MCP Python pour collecter les annuaires publics du Benin, cibler les entreprises
+stockees localement et suivre les prises de contact email ou WhatsApp sans doublon.
+
+## Sources
+
+- `companies` : societes du Guichet InvestBenin.
+- `establishments` : etablissements individuels de MonEntreprise.bj.
+
+La collecte utilise les API publiques paginees des deux annuaires. Playwright/Chromium reste
+disponible pour diagnostiquer visuellement les portails si leur structure change.
+
+## Capacites MCP
+
+- `inspect_registry` : lire un echantillon de l'une des deux sources.
+- `search_registry` : rechercher en ligne dans une source et mettre les resultats en cache.
+- `collect_registry_pages` : collecter un lot borne de pages; les pages deja stockees sont ignorees.
+- `find_saved_targets` : filtrer sans nouvel appel internet.
+- `preview_targeted_messages` : voir exactement les destinataires et messages sans envoyer.
+- `send_targeted_messages` : envoyer au maximum 50 messages par appel apres confirmation explicite.
+- `list_contact_history` : enumerer les destinataires deja traites avec leurs informations.
+- `set_do_not_contact` : bloquer durablement les futurs envois pour une entreprise.
+- `list_scrape_runs` : auditer les collectes.
+- `health_check` et `close_browser`.
+
+Les filtres locaux disponibles sont la commune, le quartier, l'activite, la date de creation,
+la source, la presence d'un email/telephone et le statut contacte/non contacte.
+
+## Protection anti-doublon
+
+PostgreSQL impose une seule ligne de contact par entreprise et par canal, ainsi qu'une seule
+utilisation d'une meme adresse ou d'un meme numero. Un message deja envoye ne peut donc pas
+etre renvoye par erreur, meme si deux appels MCP sont lances en meme temps.
+Un echec fournisseur peut etre retente, tandis qu'un statut `sent` bloque les nouveaux envois.
+
+## Demarrage Docker
+
+```powershell
+Copy-Item .env.example .env
+docker compose up --build -d
+docker compose ps
+```
+
+Le serveur MCP SSE est disponible sur `http://localhost:8283/sse` et le controle de sante sur
+`http://localhost:8283/health`. PostgreSQL n'est pas expose hors du reseau Docker. Les migrations
+Alembic sont appliquees automatiquement au demarrage.
+
+## Configuration email
+
+L'adresse expediteur est deja definie sur `solvexsolution.org@gmail.com`. Renseigner dans `.env` :
+
+```dotenv
+SMTP_USERNAME=solvexsolution.org@gmail.com
+SMTP_FROM_EMAIL=solvexsolution.org@gmail.com
+SMTP_PASSWORD=mot-de-passe-application-google
+```
+
+Le mot de passe du compte Google ne doit pas etre place ici. Utiliser un mot de passe
+d'application dedie. Tant que `SMTP_PASSWORD` est vide, les apercus fonctionnent mais aucun
+email n'est envoye.
+
+## Configuration WhatsApp
+
+Le connecteur utilise Evolution API. Renseigner uniquement le fichier local `.env` :
+
+```dotenv
+WHATSAPP_PROVIDER=evolution_api
+EVOLUTION_API_BASE_URL=https://votre-evolution-api.example.com
+EVOLUTION_API_KEY=votre-cle
+EVOLUTION_API_INSTANCE=Solvexsolution
+EVOLUTION_API_DELAY_MS=123
+EVOLUTION_API_LINK_PREVIEW=true
+```
+
+Les anciens numeros beninois a huit chiffres sont normalises vers le format international
+`22901XXXXXXXX` avant l'appel Evolution API. Utiliser HTTPS en production afin que la cle API
+et le contenu des messages soient chiffres pendant leur transport.
+
+Les valeurs sensibles ne doivent jamais etre ajoutees a `.env.example`, au Compose ou au depot.
+Le fichier `.env` est ignore par Git.
+
+## Modeles de message
+
+Les champs disponibles sont : `{name}`, `{legal_name}`, `{trade_name}`, `{owner_name}`, `{city}`,
+`{district}`, `{activity}` et `{registration_number}`.
+
+Exemple :
+
+```text
+Bonjour {owner_name},
+
+Nous accompagnons les entreprises comme {name} a {city} dans leur croissance numerique.
+Seriez-vous disponible pour un court echange ?
+```
+
+Toujours appeler `preview_targeted_messages` avant `send_targeted_messages`. L'envoi reel exige
+`confirm_send=true` et reste limite a 50 destinataires par appel.
+
+## Developpement local
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+Copy-Item .env.example .env
+alembic upgrade head
+python -m enterprise_message_bot.mcp_server
+```
+
+Commandes de verification :
+
+```powershell
+pytest
+ruff check .
+docker compose config
+```

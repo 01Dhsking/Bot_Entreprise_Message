@@ -1,0 +1,90 @@
+services:
+  enterprise-message-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: enterprise-message-bot
+    environment:
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      COMPANIES_REGISTRY_URL: ${COMPANIES_REGISTRY_URL:-https://gdb.guichet.investbenin.bj/#/app/data/pm/latest/view/3/latest}
+      ESTABLISHMENTS_REGISTRY_URL: ${ESTABLISHMENTS_REGISTRY_URL:-https://gdb.monentreprise.bj/#/app/data/registre%20pp/latest/view/68/latest}
+      COMPANIES_DATA_API_URL: ${COMPANIES_DATA_API_URL:-https://gdb.guichet.investbenin.bj/data-view/pm/latest/5}
+      ESTABLISHMENTS_DATA_API_URL: ${ESTABLISHMENTS_DATA_API_URL:-https://gdb.monentreprise.bj/data-view/registre%20pp/latest/310}
+      HEADLESS: "true"
+      CHROME_PATH: /usr/bin/chromium
+      BROWSER_DATA_DIR: /app/data/browser-profile
+      NAVIGATION_TIMEOUT_SECONDS: ${NAVIGATION_TIMEOUT_SECONDS:-35}
+      PAGE_SETTLE_SECONDS: ${PAGE_SETTLE_SECONDS:-2}
+      ACTION_DELAY_SECONDS: ${ACTION_DELAY_SECONDS:-1}
+      MCP_TRANSPORT: sse
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8283
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-enterprise_bot}:${POSTGRES_PASSWORD:-enterprise_bot}@postgres:5432/${POSTGRES_DB:-enterprise_bot}
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-solvexsolution.org@gmail.com}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-solvexsolution.org@gmail.com}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Solvex Solution}
+      SMTP_USE_STARTTLS: ${SMTP_USE_STARTTLS:-true}
+      WHATSAPP_PROVIDER: ${WHATSAPP_PROVIDER:-disabled}
+      EVOLUTION_API_BASE_URL: ${EVOLUTION_API_BASE_URL:-}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:-}
+      EVOLUTION_API_INSTANCE: ${EVOLUTION_API_INSTANCE:-Solvexsolution}
+      EVOLUTION_API_DELAY_MS: ${EVOLUTION_API_DELAY_MS:-123}
+      EVOLUTION_API_LINK_PREVIEW: ${EVOLUTION_API_LINK_PREVIEW:-true}
+      PHONE_COUNTRY_CODE: ${PHONE_COUNTRY_CODE:-229}
+      PHONE_NATIONAL_PREFIX: ${PHONE_NATIONAL_PREFIX:-01}
+    ports:
+      - "${MCP_PORT:-8283}:8283"
+    volumes:
+      - enterprise-browser-data:/app/data
+    shm_size: 1gb
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:8283/health | grep -q '\"status\": \"ok\"' || exit 1"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    networks:
+      - enterprise-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: enterprise-message-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-enterprise_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-enterprise_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-enterprise_bot}
+    volumes:
+      - enterprise-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-enterprise_bot} -d ${POSTGRES_DB:-enterprise_bot}"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - enterprise-network
+
+volumes:
+  enterprise-browser-data:
+  enterprise-postgres-data:
+
+networks:
+  enterprise-network:
+    driver: bridge

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "investbenin-enterprises": {
+      "url": "http://localhost:8283/sse"
+    }
+  }
+}
