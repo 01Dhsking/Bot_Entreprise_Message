@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json
 import logging
 from datetime import date
@@ -454,26 +455,60 @@ async def _run_stdio() -> None:
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
-async def _send_json(send, status: int, payload: dict[str, Any]) -> None:
+async def _send_json(
+    send,
+    status: int,
+    payload: dict[str, Any],
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
+) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = [
+        (b"content-type", b"application/json; charset=utf-8"),
+        (b"content-length", str(len(body)).encode("ascii")),
+    ]
+    headers.extend(extra_headers or [])
     await send(
         {
             "type": "http.response.start",
             "status": status,
-            "headers": [
-                (b"content-type", b"application/json; charset=utf-8"),
-                (b"content-length", str(len(body)).encode("ascii")),
-            ],
+            "headers": headers,
         }
     )
     await send({"type": "http.response.body", "body": body})
 
 
+def _request_is_authorized(scope: dict[str, Any]) -> bool:
+    configured_key = settings.mcp_api_key
+    if not configured_key or not configured_key.get_secret_value():
+        return settings.app_environment.strip().lower() == "development"
+
+    authorization = next(
+        (
+            value.decode("latin-1")
+            for name, value in scope.get("headers", [])
+            if name.lower() == b"authorization"
+        ),
+        "",
+    )
+    scheme, separator, token = authorization.partition(" ")
+    return bool(
+        separator
+        and scheme.lower() == "bearer"
+        and hmac.compare_digest(token.strip(), configured_key.get_secret_value())
+    )
+
+
 async def _run_sse() -> None:
     import uvicorn
     from mcp.server.sse import SseServerTransport
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     sse = SseServerTransport("/messages/")
+    streamable_http = StreamableHTTPSessionManager(
+        app=app,
+        json_response=True,
+        stateless=True,
+    )
 
     async def asgi_app(scope, receive, send):
         if scope["type"] != "http":
@@ -490,12 +525,43 @@ async def _run_sse() -> None:
                     "service": settings.app_name,
                     "database": database,
                     "providers": provider_status(),
+                    "mcp_authentication": {
+                        "configured": bool(
+                            settings.mcp_api_key and settings.mcp_api_key.get_secret_value()
+                        )
+                    },
                 },
             )
+        elif path in {"/mcp", "/mcp/"}:
+            if not _request_is_authorized(scope):
+                await _send_json(
+                    send,
+                    401,
+                    {"status": "unauthorized"},
+                    [(b"www-authenticate", b"Bearer")],
+                )
+                return
+            await streamable_http.handle_request(scope, receive, send)
         elif path == "/sse" and method == "GET":
+            if not _request_is_authorized(scope):
+                await _send_json(
+                    send,
+                    401,
+                    {"status": "unauthorized"},
+                    [(b"www-authenticate", b"Bearer")],
+                )
+                return
             async with sse.connect_sse(scope, receive, send) as streams:
                 await app.run(streams[0], streams[1], app.create_initialization_options())
         elif path.startswith("/messages/") and method == "POST":
+            if not _request_is_authorized(scope):
+                await _send_json(
+                    send,
+                    401,
+                    {"status": "unauthorized"},
+                    [(b"www-authenticate", b"Bearer")],
+                )
+                return
             await sse.handle_post_message(scope, receive, send)
         else:
             await _send_json(send, 404, {"status": "not_found"})
@@ -506,7 +572,8 @@ async def _run_sse() -> None:
         port=settings.mcp_port,
         log_level=settings.log_level.lower(),
     )
-    await uvicorn.Server(config).serve()
+    async with streamable_http.run():
+        await uvicorn.Server(config).serve()
 
 
 async def main() -> None:

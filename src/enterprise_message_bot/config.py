@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     mcp_transport: str = "stdio"
     mcp_host: str = "0.0.0.0"
     mcp_port: int = Field(default=8283, ge=1, le=65535)
+    mcp_api_key: SecretStr | None = None
 
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = Field(default=587, ge=1, le=65535)

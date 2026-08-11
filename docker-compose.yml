@@ -23,6 +23,7 @@ services:
       MCP_TRANSPORT: sse
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8283
+      MCP_API_KEY: ${MCP_API_KEY:?MCP_API_KEY must be configured}
       DATABASE_URL: ""
       DATABASE_HOST: enterprise-postgres
       DATABASE_PORT: 5432

@@ -44,10 +44,14 @@ docker compose ps
 
 En local, le Compose n'expose volontairement aucun port. En production Dokploy, definir
 `ENTERPRISE_MESSAGE_HOST` avec le domaine public choisi. Traefik publie alors le serveur MCP sur
-`https://<domaine>/sse` et le controle de sante sur `https://<domaine>/health`.
+`https://<domaine>/mcp` et le controle de sante sur `https://<domaine>/health`. L'ancien endpoint
+SSE `/sse` reste disponible pour les clients historiques.
 
 `ENTERPRISE_MESSAGE_HOST` doit contenir uniquement le nom d'hote, sans `https://`, chemin ni slash
 final. Exemple : `bot-entreprise.example.com`.
+
+Definir aussi une longue valeur aleatoire `MCP_API_KEY` dans Dokploy. Le endpoint `/mcp` exige
+l'en-tete `Authorization: Bearer <MCP_API_KEY>`. Ne jamais placer cette cle dans le depot Git.
 
 Le serveur MCP rejoint `dokploy-network`, tandis que PostgreSQL reste uniquement sur le reseau
 prive `enterprise-internal`. Les migrations Alembic sont appliquees automatiquement au demarrage.
