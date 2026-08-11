@@ -23,7 +23,12 @@ services:
       MCP_TRANSPORT: sse
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8283
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-enterprise_bot}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured}@postgres:5432/${POSTGRES_DB:-enterprise_bot}
+      DATABASE_URL: ""
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${POSTGRES_DB:-enterprise_bot}
+      DATABASE_USER: ${POSTGRES_USER:-enterprise_bot}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured}
       SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-solvexsolution.org@gmail.com}

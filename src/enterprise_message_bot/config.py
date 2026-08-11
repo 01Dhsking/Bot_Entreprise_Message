@@ -1,8 +1,9 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -37,9 +38,12 @@ class Settings(BaseSettings):
     chrome_path: str | None = None
     browser_data_dir: Path = PROJECT_ROOT / "data" / "browser-profile"
 
-    database_url: str = (
-        "postgresql+asyncpg://enterprise_bot:enterprise_bot@localhost:5432/enterprise_bot"
-    )
+    database_url: str = ""
+    database_host: str = "localhost"
+    database_port: int = Field(default=5432, ge=1, le=65535)
+    database_name: str = "enterprise_bot"
+    database_user: str = "enterprise_bot"
+    database_password: SecretStr | None = None
     database_pool_size: int = Field(default=5, ge=1, le=30)
     database_max_overflow: int = Field(default=5, ge=0, le=30)
 
@@ -80,14 +84,38 @@ class Settings(BaseSettings):
             raise ValueError("WHATSAPP_PROVIDER must be 'disabled' or 'evolution_api'")
         return normalized
 
-    @field_validator("database_url")
+    @field_validator("database_url", mode="before")
     @classmethod
-    def normalize_database_url(cls, value: str) -> str:
+    def normalize_database_url(cls, value: object) -> str:
+        if value is None or not str(value).strip():
+            return ""
+        value = str(value).strip()
         if value.startswith("postgres://"):
             return value.replace("postgres://", "postgresql+asyncpg://", 1)
         if value.startswith("postgresql://"):
             return value.replace("postgresql://", "postgresql+asyncpg://", 1)
         return value
+
+    @model_validator(mode="after")
+    def build_database_url(self) -> "Settings":
+        if self.database_url:
+            return self
+
+        password = self.database_password.get_secret_value() if self.database_password else ""
+        if not password:
+            if self.app_environment.strip().lower() != "development":
+                raise ValueError("DATABASE_PASSWORD is required outside development")
+            password = "enterprise_bot"
+
+        self.database_url = URL.create(
+            drivername="postgresql+asyncpg",
+            username=self.database_user,
+            password=password,
+            host=self.database_host,
+            port=self.database_port,
+            database=self.database_name,
+        ).render_as_string(hide_password=False)
+        return self
 
     @property
     def sync_database_url(self) -> str:
