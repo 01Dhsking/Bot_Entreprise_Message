@@ -42,9 +42,17 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Le serveur MCP SSE est disponible sur `http://localhost:8283/sse` et le controle de sante sur
-`http://localhost:8283/health`. PostgreSQL n'est pas expose hors du reseau Docker. Les migrations
-Alembic sont appliquees automatiquement au demarrage.
+En local, le Compose n'expose volontairement aucun port. En production Dokploy, definir
+`ENTERPRISE_MESSAGE_HOST` avec le domaine public choisi. Traefik publie alors le serveur MCP sur
+`https://<domaine>/sse` et le controle de sante sur `https://<domaine>/health`.
+
+Le serveur MCP rejoint `dokploy-network`, tandis que PostgreSQL reste uniquement sur le reseau
+prive `enterprise-internal`. Les migrations Alembic sont appliquees automatiquement au demarrage.
+Le reseau externe Dokploy doit deja exister :
+
+```bash
+docker network inspect dokploy-network
+```
 
 ## Configuration email
 

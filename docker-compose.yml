@@ -3,7 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: enterprise-message-bot
+    image: enterprise-message-bot:latest
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
       APP_ENVIRONMENT: ${APP_ENVIRONMENT:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -36,15 +39,16 @@ services:
       EVOLUTION_API_LINK_PREVIEW: ${EVOLUTION_API_LINK_PREVIEW:-true}
       PHONE_COUNTRY_CODE: ${PHONE_COUNTRY_CODE:-229}
       PHONE_NATIONAL_PREFIX: ${PHONE_NATIONAL_PREFIX:-01}
-    ports:
-      - "${MCP_PORT:-8283}:8283"
+    expose:
+      - "8283"
     volumes:
       - enterprise-browser-data:/app/data
     shm_size: 1gb
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test:
         [
@@ -56,11 +60,22 @@ services:
       retries: 5
       start_period: 45s
     networks:
-      - enterprise-network
+      - enterprise-internal
+      - dokploy-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=dokploy-network"
+      - "traefik.http.routers.enterprise-message-mcp.rule=Host(`${ENTERPRISE_MESSAGE_HOST:-bot-entreprise.localhost}`)"
+      - "traefik.http.routers.enterprise-message-mcp.entrypoints=websecure"
+      - "traefik.http.routers.enterprise-message-mcp.tls=true"
+      - "traefik.http.routers.enterprise-message-mcp.service=enterprise-message-mcp"
+      - "traefik.http.services.enterprise-message-mcp.loadbalancer.server.port=8283"
 
   postgres:
     image: postgres:16-alpine
-    container_name: enterprise-message-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-enterprise_bot}
       POSTGRES_USER: ${POSTGRES_USER:-enterprise_bot}
@@ -77,14 +92,19 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
-    restart: unless-stopped
     networks:
-      - enterprise-network
+      - enterprise-internal
+    labels:
+      - "traefik.enable=false"
 
 volumes:
   enterprise-browser-data:
   enterprise-postgres-data:
 
 networks:
-  enterprise-network:
+  enterprise-internal:
     driver: bridge
+    internal: true
+  dokploy-network:
+    name: dokploy-network
+    external: true
