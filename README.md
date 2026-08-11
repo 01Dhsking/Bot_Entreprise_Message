@@ -46,8 +46,13 @@ En local, le Compose n'expose volontairement aucun port. En production Dokploy, 
 `ENTERPRISE_MESSAGE_HOST` avec le domaine public choisi. Traefik publie alors le serveur MCP sur
 `https://<domaine>/sse` et le controle de sante sur `https://<domaine>/health`.
 
+`ENTERPRISE_MESSAGE_HOST` doit contenir uniquement le nom d'hote, sans `https://`, chemin ni slash
+final. Exemple : `bot-entreprise.example.com`.
+
 Le serveur MCP rejoint `dokploy-network`, tandis que PostgreSQL reste uniquement sur le reseau
 prive `enterprise-internal`. Les migrations Alembic sont appliquees automatiquement au demarrage.
+La base utilise l'alias prive unique `enterprise-postgres` afin d'eviter les collisions avec les
+autres services nommes `postgres` presents sur les reseaux Docker partages.
 Le reseau externe Dokploy doit deja exister :
 
 ```bash

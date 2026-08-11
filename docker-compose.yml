@@ -24,7 +24,7 @@ services:
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8283
       DATABASE_URL: ""
-      DATABASE_HOST: postgres
+      DATABASE_HOST: enterprise-postgres
       DATABASE_PORT: 5432
       DATABASE_NAME: ${POSTGRES_DB:-enterprise_bot}
       DATABASE_USER: ${POSTGRES_USER:-enterprise_bot}
@@ -104,7 +104,9 @@ services:
       retries: 10
       start_period: 10s
     networks:
-      - enterprise-internal
+      enterprise-internal:
+        aliases:
+          - enterprise-postgres
     labels:
       - "traefik.enable=false"
 
