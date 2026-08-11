@@ -18,7 +18,14 @@ from .browser import (
 from .config import get_settings
 from .database import close_database, database_health
 from .logging_config import configure_logging
-from .outreach import preview_message, provider_status, send_message
+from .outreach import (
+    _send_evolution_api,
+    _send_smtp,
+    normalize_benin_phone,
+    preview_message,
+    provider_status,
+    send_message,
+)
 from .registry_client import fetch_registry_page
 from .repository import (
     list_companies,
@@ -196,6 +203,39 @@ async def list_tools() -> list[types.Tool]:
                     "subject_template": {"type": "string", "maxLength": 500},
                     "body_template": {"type": "string", "minLength": 1, "maxLength": 10000},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                    "confirm_send": {"type": "boolean", "const": True},
+                },
+            },
+        ),
+        types.Tool(
+            name="send_whatsapp_message",
+            description=(
+                "Send one direct WhatsApp test message to an explicit phone number. "
+                "This bypasses campaign targeting and does not mark any company as contacted."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["number", "text", "confirm_send"],
+                "properties": {
+                    "number": {"type": "string", "minLength": 6, "maxLength": 40},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 10000},
+                    "confirm_send": {"type": "boolean", "const": True},
+                },
+            },
+        ),
+        types.Tool(
+            name="send_email_message",
+            description=(
+                "Send one direct email test message to an explicit email address. "
+                "This bypasses campaign targeting and does not mark any company as contacted."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["email", "subject", "text", "confirm_send"],
+                "properties": {
+                    "email": {"type": "string", "format": "email", "maxLength": 320},
+                    "subject": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 10000},
                     "confirm_send": {"type": "boolean", "const": True},
                 },
             },
@@ -408,6 +448,47 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
 
             if name == "send_targeted_messages":
                 return _json_content(await _campaign(args, send=True))
+
+            if name == "send_whatsapp_message":
+                if args.get("confirm_send") is not True:
+                    raise ValueError("confirm_send must be true before sending")
+                recipient = normalize_benin_phone(str(args.get("number", "")))
+                if not recipient:
+                    raise ValueError("number must be a valid Benin phone number")
+                text = str(args.get("text", "")).strip()
+                if not text:
+                    raise ValueError("text cannot be empty")
+                message_id = await _send_evolution_api(recipient, text)
+                return _json_content(
+                    {
+                        "status": "sent",
+                        "channel": "whatsapp",
+                        "recipient": recipient,
+                        "provider_message_id": message_id,
+                    }
+                )
+
+            if name == "send_email_message":
+                if args.get("confirm_send") is not True:
+                    raise ValueError("confirm_send must be true before sending")
+                email = str(args.get("email", "")).strip()
+                subject = str(args.get("subject", "")).strip()
+                text = str(args.get("text", "")).strip()
+                if not email or "@" not in email:
+                    raise ValueError("email must be valid")
+                if not subject:
+                    raise ValueError("subject cannot be empty")
+                if not text:
+                    raise ValueError("text cannot be empty")
+                message_id = await asyncio.to_thread(_send_smtp, email, subject, text)
+                return _json_content(
+                    {
+                        "status": "sent",
+                        "channel": "email",
+                        "recipient": email,
+                        "provider_message_id": message_id,
+                    }
+                )
 
             if name == "list_contact_history":
                 return _json_content(
