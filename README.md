@@ -57,30 +57,12 @@ docker network inspect dokploy-network
 ### Mot de passe PostgreSQL et volume persistant
 
 `POSTGRES_PASSWORD` est obligatoire et doit rester stable. PostgreSQL utilise cette valeur lors de
-la toute premiere initialisation du volume. La modifier ensuite dans Dokploy ne modifie pas le mot
-de passe deja stocke dans la base.
+la toute premiere initialisation du volume. Au demarrage, le conteneur synchronise aussi le mot de
+passe du role existant avec la valeur courante avant d'etre declare sain. Cela permet a un ancien
+volume d'adopter la configuration Dokploy sans supprimer les donnees.
 
-Si les logs indiquent `password authentication failed`, remettre dans Dokploy le mot de passe qui
-etait configure lors de la creation initiale du volume. Pour une installation encore vide, l'autre
-solution consiste a supprimer volontairement le volume PostgreSQL depuis Dokploy, puis redeployer.
-Cette seconde operation efface toutes les donnees collectees et ne doit pas etre utilisee sur une
-base contenant des informations utiles.
-
-Pour conserver les donnees tout en adoptant un nouveau mot de passe, ouvrir le terminal du
-conteneur `postgres`, puis executer :
-
-```bash
-psql -U enterprise_bot -d enterprise_bot
-```
-
-Dans l'invite PostgreSQL :
-
-```text
-\password enterprise_bot
-\q
-```
-
-Saisir deux fois la valeur configuree dans `POSTGRES_PASSWORD`, puis redemarrer le service MCP.
+Le log `PostgreSQL role password synchronized` doit apparaitre avant le demarrage du serveur MCP.
+La suppression du volume n'est pas necessaire pour un simple changement de mot de passe.
 
 ## Configuration email
 

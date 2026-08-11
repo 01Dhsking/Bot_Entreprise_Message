@@ -74,6 +74,11 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - /opt/enterprise-message/postgres-entrypoint.sh
+    command:
+      - postgres
     env_file:
       - .env
     environment:
@@ -82,11 +87,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured}
     volumes:
       - enterprise-postgres-data:/var/lib/postgresql/data
+      - ./scripts/postgres-entrypoint.sh:/opt/enterprise-message/postgres-entrypoint.sh:ro
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-enterprise_bot} -d ${POSTGRES_DB:-enterprise_bot}"
+          "test -f /tmp/postgres-password-synced && pg_isready -U ${POSTGRES_USER:-enterprise_bot} -d ${POSTGRES_DB:-enterprise_bot}"
         ]
       interval: 10s
       timeout: 5s
