@@ -23,7 +23,7 @@ services:
       MCP_TRANSPORT: sse
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8283
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-enterprise_bot}:${POSTGRES_PASSWORD:-enterprise_bot}@postgres:5432/${POSTGRES_DB:-enterprise_bot}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-enterprise_bot}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured}@postgres:5432/${POSTGRES_DB:-enterprise_bot}
       SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-solvexsolution.org@gmail.com}
@@ -79,7 +79,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-enterprise_bot}
       POSTGRES_USER: ${POSTGRES_USER:-enterprise_bot}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-enterprise_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured}
     volumes:
       - enterprise-postgres-data:/var/lib/postgresql/data
     healthcheck:
