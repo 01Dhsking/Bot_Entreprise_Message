@@ -6,6 +6,7 @@ from enterprise_message_bot.outreach import (
     encode_json_ascii,
     extract_primary_email,
     normalize_benin_phone,
+    preview_message,
     render_template,
 )
 
@@ -61,3 +62,25 @@ def test_encode_json_ascii_preserves_accents_as_escapes() -> None:
     assert encoded.isascii()
     assert "\\u2019" in encoded
     assert "\\u00e0" in encoded
+
+
+def test_whatsapp_campaign_preview_is_permission_first() -> None:
+    preview = preview_message(
+        {
+            "id": "company-id",
+            "legal_name": "ENTREPRISE TEST",
+            "owner_first_name": "Awa",
+            "owner_last_name": "Diop",
+            "phone": "96 95 29 07",
+            "contacted_channels": [],
+            "do_not_contact": False,
+        },
+        "whatsapp",
+        None,
+        "Voici notre présentation commerciale.",
+        permission_first=True,
+    )
+
+    assert preview["body"].startswith("Bonjour Awa Diop")
+    assert preview["follow_up_body"] == "Voici notre présentation commerciale."
+    assert "présentation commerciale" not in preview["body"]

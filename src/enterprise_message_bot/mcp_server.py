@@ -2,7 +2,7 @@ import asyncio
 import hmac
 import json
 import logging
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import mcp.types as types
@@ -16,7 +16,9 @@ from .browser import (
     validate_source_type,
 )
 from .config import get_settings
+from .conversation import campaign_delay_seconds
 from .database import close_database, database_health
+from .dispatcher import run_outbound_dispatcher
 from .inbound import (
     configure_evolution_webhook,
     parse_evolution_message,
@@ -34,10 +36,12 @@ from .outreach import (
 from .registry_client import fetch_registry_page
 from .repository import (
     acknowledge_incoming_messages,
+    handle_permission_reply,
     list_companies,
     list_contact_history,
     list_incoming_messages,
     list_runs,
+    next_whatsapp_campaign_start,
     repository_stats,
     save_incoming_message,
     save_registry_page,
@@ -387,7 +391,13 @@ async def _campaign(args: dict[str, Any], *, send: bool) -> dict[str, Any]:
 
     if not send:
         previews = [
-            preview_message(company, channel, subject_template, body_template)
+            preview_message(
+                company,
+                channel,
+                subject_template,
+                body_template,
+                permission_first=channel == "whatsapp",
+            )
             for company in companies
         ]
         return {
@@ -401,9 +411,21 @@ async def _campaign(args: dict[str, Any], *, send: bool) -> dict[str, Any]:
     if args.get("confirm_send") is not True:
         raise ValueError("confirm_send must be true before sending")
     results: list[dict[str, Any]] = []
-    for company in companies:
+    scheduled_at = (
+        await next_whatsapp_campaign_start() if channel == "whatsapp" else datetime.now(UTC)
+    )
+    for index, company in enumerate(companies):
         try:
-            results.append(await send_message(company, channel, subject_template, body_template))
+            results.append(
+                await send_message(
+                    company,
+                    channel,
+                    subject_template,
+                    body_template,
+                    permission_first=channel == "whatsapp",
+                    scheduled_at=scheduled_at if channel == "whatsapp" else None,
+                )
+            )
         except Exception as exc:
             results.append(
                 {
@@ -413,12 +435,17 @@ async def _campaign(args: dict[str, Any], *, send: bool) -> dict[str, Any]:
                     "error": str(exc),
                 }
             )
+        if channel == "whatsapp" and index < len(companies) - 1:
+            scheduled_at += timedelta(seconds=campaign_delay_seconds(index))
     return {
         "mode": "send",
         "channel": channel,
         "matched": len(companies),
         "sent": sum(1 for result in results if result.get("status") == "sent"),
-        "not_sent": sum(1 for result in results if result.get("status") != "sent"),
+        "queued": sum(1 for result in results if result.get("status") == "queued"),
+        "not_sent": sum(
+            1 for result in results if result.get("status") not in {"sent", "queued"}
+        ),
         "results": results,
     }
 
@@ -706,7 +733,16 @@ async def _run_sse() -> None:
                     await _send_json(send, 200, {"status": "ignored"})
                     return
                 result = await save_incoming_message(parsed)
-                await _send_json(send, 200, {"status": "accepted", **result})
+                conversation = (
+                    await handle_permission_reply(parsed.get("sender_phone"), parsed.get("text"))
+                    if result.get("created")
+                    else {"action": "ignored", "reason": "duplicate message"}
+                )
+                await _send_json(
+                    send,
+                    200,
+                    {"status": "accepted", **result, "conversation": conversation},
+                )
             except (json.JSONDecodeError, ValueError) as exc:
                 await _send_json(send, 400, {"status": "invalid_request", "error": str(exc)})
             except Exception:
@@ -761,7 +797,12 @@ async def _run_sse() -> None:
                 log.warning("Evolution inbound webhook is inactive: %s", webhook.get("reason"))
         except Exception as exc:
             log.warning("Could not configure Evolution inbound webhook: %s", exc)
-        await uvicorn.Server(config).serve()
+        dispatcher_task = asyncio.create_task(run_outbound_dispatcher())
+        try:
+            await uvicorn.Server(config).serve()
+        finally:
+            dispatcher_task.cancel()
+            await asyncio.gather(dispatcher_task, return_exceptions=True)
 
 
 async def main() -> None:

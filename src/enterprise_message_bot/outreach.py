@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import smtplib
+from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr
 from typing import Any
@@ -10,7 +11,8 @@ from urllib.parse import quote
 import httpx
 
 from .config import get_settings
-from .repository import complete_contact_attempt, reserve_contact_attempt
+from .conversation import permission_opener
+from .repository import complete_contact_attempt, queue_outbound_message, reserve_contact_attempt
 
 settings = get_settings()
 
@@ -177,7 +179,12 @@ async def _send_evolution_api(recipient: str, body: str) -> str:
 
 
 def preview_message(
-    company: dict[str, Any], channel: str, subject_template: str | None, body_template: str
+    company: dict[str, Any],
+    channel: str,
+    subject_template: str | None,
+    body_template: str,
+    *,
+    permission_first: bool = False,
 ) -> dict[str, Any]:
     if channel == "email":
         recipient = extract_primary_email(company.get("email"))
@@ -187,22 +194,42 @@ def preview_message(
         subject = None
     else:
         raise ValueError("channel must be email or whatsapp")
-    return {
+    campaign_body = render_template(body_template, company)
+    outbound_body = (
+        permission_opener(company) if channel == "whatsapp" and permission_first else campaign_body
+    )
+    result = {
         "company_id": company["id"],
         "company_name": company.get("legal_name"),
         "channel": channel,
         "recipient": recipient,
         "subject": subject,
-        "body": render_template(body_template, company),
+        "body": outbound_body,
         "sendable": bool(recipient) and not company.get("do_not_contact", False),
         "already_contacted": channel in company.get("contacted_channels", []),
     }
+    if channel == "whatsapp" and permission_first:
+        result["follow_up_body"] = campaign_body
+        result["conversation_stage"] = "permission_opener"
+    return result
 
 
 async def send_message(
-    company: dict[str, Any], channel: str, subject_template: str | None, body_template: str
+    company: dict[str, Any],
+    channel: str,
+    subject_template: str | None,
+    body_template: str,
+    *,
+    permission_first: bool = False,
+    scheduled_at: datetime | None = None,
 ) -> dict[str, Any]:
-    preview = preview_message(company, channel, subject_template, body_template)
+    preview = preview_message(
+        company,
+        channel,
+        subject_template,
+        body_template,
+        permission_first=permission_first,
+    )
     if not preview["recipient"]:
         raise ValueError(f"No valid {channel} recipient for this company")
     if preview["already_contacted"]:
@@ -217,10 +244,31 @@ async def send_message(
         recipient=preview["recipient"],
         subject=preview["subject"],
         body=preview["body"],
-        metadata={"source_type": company.get("source_type")},
+        metadata={
+            "source_type": company.get("source_type"),
+            "conversation_stage": "opener_queued" if permission_first else None,
+            "follow_up_body": preview.get("follow_up_body"),
+        },
     )
     attempt_id = reservation["attempt_id"]
     try:
+        if channel == "whatsapp" and permission_first:
+            if scheduled_at is None:
+                raise ValueError("scheduled_at is required for a paced WhatsApp campaign")
+            queued = await queue_outbound_message(
+                attempt_id=attempt_id,
+                kind="permission_opener",
+                recipient=preview["recipient"],
+                body=preview["body"],
+                scheduled_at=scheduled_at,
+                metadata={"conversation_stage": "permission_opener"},
+            )
+            return {
+                **preview,
+                "status": "queued",
+                "attempt_id": attempt_id,
+                **queued,
+            }
         if channel == "email":
             provider_message_id = await asyncio.to_thread(
                 _send_smtp,

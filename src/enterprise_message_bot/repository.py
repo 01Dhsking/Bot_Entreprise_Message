@@ -1,14 +1,22 @@
 import hashlib
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, desc, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
+from .conversation import campaign_delay_seconds, classify_permission_reply
 from .database import SessionFactory
-from .models import Company, ContactAttempt, IncomingMessage, PageSnapshot, ScrapeRun
+from .models import (
+    Company,
+    ContactAttempt,
+    IncomingMessage,
+    OutboundQueueItem,
+    PageSnapshot,
+    ScrapeRun,
+)
 from .schemas import RegistryCompany, RegistryPage, parse_registry_date
 
 
@@ -344,6 +352,187 @@ async def complete_contact_attempt(
         await session.commit()
 
 
+async def queue_outbound_message(
+    *,
+    attempt_id: str,
+    kind: str,
+    recipient: str,
+    body: str,
+    scheduled_at: datetime,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    async with SessionFactory() as session:
+        item = OutboundQueueItem(
+            contact_attempt_id=uuid.UUID(attempt_id),
+            kind=kind,
+            recipient=recipient,
+            body=body,
+            status="queued",
+            scheduled_at=scheduled_at,
+            metadata_json=metadata or {},
+        )
+        session.add(item)
+        await session.commit()
+        return {
+            "queue_item_id": str(item.id),
+            "status": item.status,
+            "scheduled_at": item.scheduled_at.isoformat(),
+        }
+
+
+async def next_whatsapp_campaign_start() -> datetime:
+    now = datetime.now(UTC)
+    async with SessionFactory() as session:
+        latest = await session.scalar(
+            select(func.max(OutboundQueueItem.scheduled_at)).where(
+                OutboundQueueItem.status.in_(["queued", "sending"]),
+                OutboundQueueItem.kind == "permission_opener",
+            )
+        )
+    return max(now, latest + timedelta(seconds=30)) if latest else now
+
+
+async def outbound_dispatch_wait_seconds() -> float:
+    async with SessionFactory() as session:
+        latest_sent = await session.scalar(
+            select(func.max(OutboundQueueItem.sent_at)).where(
+                OutboundQueueItem.status == "sent"
+            )
+        )
+        sent_count = await session.scalar(
+            select(func.count())
+            .select_from(OutboundQueueItem)
+            .where(OutboundQueueItem.status == "sent")
+        )
+    if latest_sent is None:
+        return 0
+    required_delay = campaign_delay_seconds(max(int(sent_count or 1) - 1, 0))
+    ready_at = latest_sent + timedelta(seconds=required_delay)
+    return max((ready_at - datetime.now(UTC)).total_seconds(), 0)
+
+
+async def claim_next_outbound_message() -> dict[str, Any] | None:
+    async with SessionFactory() as session:
+        item = await session.scalar(
+            select(OutboundQueueItem)
+            .where(
+                OutboundQueueItem.status == "queued",
+                OutboundQueueItem.scheduled_at <= datetime.now(UTC),
+            )
+            .order_by(OutboundQueueItem.scheduled_at, OutboundQueueItem.created_at)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if item is None:
+            return None
+        item.status = "sending"
+        item.attempt_count += 1
+        await session.commit()
+        return {
+            "id": str(item.id),
+            "attempt_id": str(item.contact_attempt_id),
+            "kind": item.kind,
+            "recipient": item.recipient,
+            "body": item.body,
+        }
+
+
+async def complete_outbound_message(
+    queue_item_id: str,
+    *,
+    success: bool,
+    provider_message_id: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    now = datetime.now(UTC)
+    async with SessionFactory() as session:
+        item = await session.get(OutboundQueueItem, uuid.UUID(queue_item_id))
+        if item is None:
+            raise ValueError("Outbound queue item not found")
+        attempt = await session.get(ContactAttempt, item.contact_attempt_id)
+        if attempt is None:
+            raise ValueError("Contact attempt not found")
+
+        item.status = "sent" if success else "failed"
+        item.provider_message_id = provider_message_id
+        item.error_message = error_message
+        item.sent_at = now if success else None
+        metadata = dict(attempt.metadata_json or {})
+        if item.kind == "permission_opener":
+            attempt.status = "sent" if success else "failed"
+            attempt.provider_message_id = provider_message_id
+            attempt.error_message = error_message
+            attempt.sent_at = now if success else None
+            metadata["conversation_stage"] = "awaiting_permission" if success else "opener_failed"
+        elif item.kind == "campaign_follow_up":
+            metadata["conversation_stage"] = "follow_up_sent" if success else "follow_up_failed"
+            metadata["follow_up_provider_message_id"] = provider_message_id
+            metadata["follow_up_error"] = error_message
+        attempt.metadata_json = metadata
+        await session.commit()
+
+
+async def handle_permission_reply(sender_phone: str | None, text: str | None) -> dict[str, Any]:
+    if not sender_phone:
+        return {"action": "ignored", "reason": "sender phone is unavailable"}
+    async with SessionFactory() as session:
+        attempt = await session.scalar(
+            select(ContactAttempt)
+            .where(
+                ContactAttempt.channel == "whatsapp",
+                ContactAttempt.recipient == sender_phone,
+                ContactAttempt.status == "sent",
+            )
+            .order_by(desc(ContactAttempt.sent_at))
+            .with_for_update()
+            .limit(1)
+        )
+        if attempt is None:
+            return {"action": "ignored", "reason": "no matching WhatsApp campaign"}
+        metadata = dict(attempt.metadata_json or {})
+        if metadata.get("conversation_stage") != "awaiting_permission":
+            return {"action": "ignored", "reason": "campaign is not awaiting permission"}
+
+        classification = classify_permission_reply(text)
+        if classification == "opt_out":
+            company = await session.get(Company, attempt.company_id)
+            if company:
+                company.do_not_contact = True
+                company.contact_notes = "WhatsApp opt-out received"
+            metadata["conversation_stage"] = "opted_out"
+        elif classification == "negative":
+            metadata["conversation_stage"] = "permission_declined"
+        elif classification == "ambiguous":
+            metadata["conversation_stage"] = "awaiting_permission"
+            metadata["last_reply_classification"] = "ambiguous"
+        else:
+            follow_up_body = str(metadata.get("follow_up_body") or "").strip()
+            if not follow_up_body:
+                metadata["conversation_stage"] = "awaiting_permission"
+                metadata["last_reply_classification"] = "ambiguous"
+                classification = "ambiguous"
+            else:
+                session.add(
+                    OutboundQueueItem(
+                        contact_attempt_id=attempt.id,
+                        kind="campaign_follow_up",
+                        recipient=attempt.recipient,
+                        body=follow_up_body,
+                        status="queued",
+                        scheduled_at=datetime.now(UTC),
+                        metadata_json={"trigger": "positive_permission_reply"},
+                    )
+                )
+                metadata["conversation_stage"] = "follow_up_queued"
+        attempt.metadata_json = metadata
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            return {"action": "ignored", "reason": "follow-up is already queued"}
+        return {"action": classification, "stage": metadata["conversation_stage"]}
+
+
 async def list_contact_history(
     *,
     channel: str | None = None,
@@ -378,6 +567,7 @@ async def list_contact_history(
                 "error_message": attempt.error_message,
                 "attempted_at": attempt.attempted_at.isoformat(),
                 "sent_at": attempt.sent_at.isoformat() if attempt.sent_at else None,
+                "conversation_stage": (attempt.metadata_json or {}).get("conversation_stage"),
                 "company": company_to_dict(
                     company, [attempt.channel] if attempt.status == "sent" else []
                 ),
@@ -411,6 +601,11 @@ async def repository_stats() -> dict[str, int]:
         unread_count = await session.scalar(
             select(func.count()).select_from(IncomingMessage).where(IncomingMessage.read_at.is_(None))
         )
+        queued_count = await session.scalar(
+            select(func.count())
+            .select_from(OutboundQueueItem)
+            .where(OutboundQueueItem.status.in_(["queued", "sending"]))
+        )
         return {
             "companies": int(company_count or 0),
             "runs": int(run_count or 0),
@@ -418,6 +613,7 @@ async def repository_stats() -> dict[str, int]:
             "sent_contacts": int(contacted_count or 0),
             "incoming_messages": int(incoming_count or 0),
             "unread_messages": int(unread_count or 0),
+            "queued_whatsapp_messages": int(queued_count or 0),
         }
 
 

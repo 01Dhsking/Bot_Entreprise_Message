@@ -135,6 +135,19 @@ Seriez-vous disponible pour un court echange ?
 Toujours appeler `preview_targeted_messages` avant `send_targeted_messages`. L'envoi reel exige
 `confirm_send=true` et reste limite a 50 destinataires par appel.
 
+## Conversations WhatsApp en deux temps
+
+Une campagne WhatsApp ne transmet plus directement le long message commercial. Pour chaque
+nouveau destinataire, elle programme d'abord une introduction qui identifie SolvexSolution et
+demande l'autorisation de presenter l'offre. La file PostgreSQL espace globalement les
+introductions selon le cycle auditable `30`, `60`, puis `120` secondes, y compris entre deux
+campagnes.
+
+Une reponse positive explicite programme le message de campagne conserve dans l'historique. Un
+refus n'envoie rien, `STOP` place l'entreprise en liste d'exclusion et une reponse ambigue attend
+une revue manuelle. Le worker persistant reprend automatiquement les elements encore en file apres
+un redemarrage du service.
+
 ## Developpement local
 
 ```powershell
