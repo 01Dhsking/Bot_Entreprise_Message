@@ -283,6 +283,13 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="configure_incoming_webhook",
+            description=(
+                "Reconnect the Evolution API MESSAGES_UPSERT webhook to this persistent inbox."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
             name="acknowledge_incoming_messages",
             description="Mark selected incoming WhatsApp messages as read.",
             inputSchema={
@@ -548,6 +555,9 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
                     limit=int(args.get("limit", 50)),
                 )
                 return _json_content({"count": len(messages), "messages": messages})
+
+            if name == "configure_incoming_webhook":
+                return _json_content(await configure_evolution_webhook())
 
             if name == "acknowledge_incoming_messages":
                 message_ids = args.get("message_ids")

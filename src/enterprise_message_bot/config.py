@@ -85,7 +85,7 @@ class Settings(BaseSettings):
 
     @property
     def resolved_evolution_webhook_secret(self) -> str | None:
-        secret = self.evolution_webhook_secret or self.mcp_api_key
+        secret = self.evolution_webhook_secret or self.evolution_api_key or self.mcp_api_key
         return secret.get_secret_value() if secret and secret.get_secret_value() else None
 
     @field_validator("mcp_transport")

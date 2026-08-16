@@ -40,3 +40,12 @@ def test_database_url_safely_encodes_complex_password() -> None:
     assert parsed_url.password == password
     assert "%40" in settings.database_url
     assert "%23" in settings.database_url
+
+
+def test_evolution_key_secures_webhook_by_default() -> None:
+    settings = Settings(
+        _env_file=None,
+        evolution_api_key=SecretStr("evolution-secret"),
+        mcp_api_key=SecretStr("mcp-secret"),
+    )
+    assert settings.resolved_evolution_webhook_secret == "evolution-secret"
