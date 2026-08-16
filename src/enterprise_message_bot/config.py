@@ -66,8 +66,27 @@ class Settings(BaseSettings):
     evolution_api_instance: str = "Solvexsolution"
     evolution_api_delay_ms: int = Field(default=123, ge=0, le=60_000)
     evolution_api_link_preview: bool = True
+    enterprise_message_host: str | None = None
+    evolution_webhook_url: str | None = None
+    evolution_webhook_secret: SecretStr | None = None
     phone_country_code: str = "229"
     phone_national_prefix: str = "01"
+
+    @property
+    def resolved_evolution_webhook_url(self) -> str | None:
+        if self.evolution_webhook_url and self.evolution_webhook_url.strip():
+            return self.evolution_webhook_url.strip()
+        if self.enterprise_message_host and self.enterprise_message_host.strip():
+            host = self.enterprise_message_host.strip().removeprefix("https://").removeprefix(
+                "http://"
+            )
+            return f"https://{host.rstrip('/')}/webhooks/evolution"
+        return None
+
+    @property
+    def resolved_evolution_webhook_secret(self) -> str | None:
+        secret = self.evolution_webhook_secret or self.mcp_api_key
+        return secret.get_secret_value() if secret and secret.get_secret_value() else None
 
     @field_validator("mcp_transport")
     @classmethod

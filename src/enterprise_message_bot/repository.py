@@ -3,12 +3,12 @@ import uuid
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import and_, desc, exists, func, or_, select
+from sqlalchemy import and_, desc, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from .database import SessionFactory
-from .models import Company, ContactAttempt, PageSnapshot, ScrapeRun
+from .models import Company, ContactAttempt, IncomingMessage, PageSnapshot, ScrapeRun
 from .schemas import RegistryCompany, RegistryPage, parse_registry_date
 
 
@@ -407,12 +407,116 @@ async def repository_stats() -> dict[str, int]:
         contacted_count = await session.scalar(
             select(func.count()).select_from(ContactAttempt).where(ContactAttempt.status == "sent")
         )
+        incoming_count = await session.scalar(select(func.count()).select_from(IncomingMessage))
+        unread_count = await session.scalar(
+            select(func.count()).select_from(IncomingMessage).where(IncomingMessage.read_at.is_(None))
+        )
         return {
             "companies": int(company_count or 0),
             "runs": int(run_count or 0),
             "snapshots": int(snapshot_count or 0),
             "sent_contacts": int(contacted_count or 0),
+            "incoming_messages": int(incoming_count or 0),
+            "unread_messages": int(unread_count or 0),
         }
+
+
+async def save_incoming_message(message: dict[str, Any]) -> dict[str, Any]:
+    async with SessionFactory() as session:
+        existing = await session.scalar(
+            select(IncomingMessage).where(
+                IncomingMessage.instance == message["instance"],
+                IncomingMessage.provider_message_id == message["provider_message_id"],
+            )
+        )
+        if existing:
+            return {"message_id": str(existing.id), "created": False}
+
+        attempt = None
+        sender_phone = message.get("sender_phone")
+        if sender_phone:
+            attempt = await session.scalar(
+                select(ContactAttempt)
+                .where(
+                    ContactAttempt.channel == "whatsapp",
+                    ContactAttempt.recipient == sender_phone,
+                )
+                .order_by(desc(ContactAttempt.attempted_at))
+                .limit(1)
+            )
+        incoming = IncomingMessage(
+            company_id=attempt.company_id if attempt else None,
+            contact_attempt_id=attempt.id if attempt else None,
+            **message,
+        )
+        session.add(incoming)
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            duplicate = await session.scalar(
+                select(IncomingMessage).where(
+                    IncomingMessage.instance == message["instance"],
+                    IncomingMessage.provider_message_id == message["provider_message_id"],
+                )
+            )
+            if duplicate:
+                return {"message_id": str(duplicate.id), "created": False}
+            raise
+        return {"message_id": str(incoming.id), "created": True}
+
+
+async def list_incoming_messages(
+    *, unread_only: bool = True, sender_phone: str | None = None, limit: int = 50
+) -> list[dict[str, Any]]:
+    statement = (
+        select(IncomingMessage, Company)
+        .outerjoin(Company, Company.id == IncomingMessage.company_id)
+        .order_by(desc(IncomingMessage.received_at))
+        .limit(min(max(limit, 1), 200))
+    )
+    if unread_only:
+        statement = statement.where(IncomingMessage.read_at.is_(None))
+    if sender_phone:
+        digits = "".join(character for character in sender_phone if character.isdigit())
+        statement = statement.where(IncomingMessage.sender_phone == digits)
+    async with SessionFactory() as session:
+        rows = (await session.execute(statement)).all()
+        return [
+            {
+                "id": str(message.id),
+                "instance": message.instance,
+                "provider_message_id": message.provider_message_id,
+                "sender_phone": message.sender_phone,
+                "sender_name": message.sender_name,
+                "message_type": message.message_type,
+                "text": message.text,
+                "received_at": message.received_at.isoformat(),
+                "captured_at": message.captured_at.isoformat(),
+                "read_at": message.read_at.isoformat() if message.read_at else None,
+                "company": company_to_dict(company) if company else None,
+                "contact_attempt_id": (
+                    str(message.contact_attempt_id) if message.contact_attempt_id else None
+                ),
+            }
+            for message, company in rows
+        ]
+
+
+async def acknowledge_incoming_messages(message_ids: list[str]) -> dict[str, int]:
+    normalized_ids = [uuid.UUID(value) for value in message_ids]
+    if not normalized_ids:
+        raise ValueError("message_ids cannot be empty")
+    if len(normalized_ids) > 100:
+        raise ValueError("at most 100 messages can be acknowledged at once")
+    async with SessionFactory() as session:
+        result = await session.execute(
+            update(IncomingMessage)
+            .where(IncomingMessage.id.in_(normalized_ids), IncomingMessage.read_at.is_(None))
+            .values(read_at=datetime.now(UTC))
+        )
+        await session.commit()
+        return {"acknowledged": int(result.rowcount or 0)}
 
 
 async def list_runs(limit: int = 20) -> list[dict[str, Any]]:

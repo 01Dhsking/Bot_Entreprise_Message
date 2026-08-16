@@ -136,3 +136,36 @@ class ContactAttempt(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     company: Mapped[Company] = relationship(back_populates="contact_attempts")
+
+
+class IncomingMessage(Base):
+    __tablename__ = "incoming_messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "instance", "provider_message_id", name="uq_incoming_message_instance_provider_id"
+        ),
+        Index("ix_incoming_messages_received_at", "received_at"),
+        Index("ix_incoming_messages_read_at", "read_at"),
+        Index("ix_incoming_messages_sender_phone", "sender_phone"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id", ondelete="SET NULL")
+    )
+    contact_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("contact_attempts.id", ondelete="SET NULL")
+    )
+    instance: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider_message_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    remote_jid: Mapped[str] = mapped_column(String(500), nullable=False)
+    sender_phone: Mapped[str | None] = mapped_column(String(80))
+    sender_name: Mapped[str | None] = mapped_column(String(500))
+    message_type: Mapped[str] = mapped_column(String(100), nullable=False, default="unknown")
+    text: Mapped[str | None] = mapped_column(Text)
+    raw_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

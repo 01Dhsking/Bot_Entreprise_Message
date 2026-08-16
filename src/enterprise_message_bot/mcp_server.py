@@ -17,6 +17,11 @@ from .browser import (
 )
 from .config import get_settings
 from .database import close_database, database_health
+from .inbound import (
+    configure_evolution_webhook,
+    parse_evolution_message,
+    webhook_request_is_authorized,
+)
 from .logging_config import configure_logging
 from .outreach import (
     _send_evolution_api,
@@ -28,10 +33,13 @@ from .outreach import (
 )
 from .registry_client import fetch_registry_page
 from .repository import (
+    acknowledge_incoming_messages,
     list_companies,
     list_contact_history,
+    list_incoming_messages,
     list_runs,
     repository_stats,
+    save_incoming_message,
     save_registry_page,
     saved_page_numbers,
     set_do_not_contact,
@@ -256,6 +264,37 @@ async def list_tools() -> list[types.Tool]:
                         "default": "sent",
                     },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+                },
+            },
+        ),
+        types.Tool(
+            name="list_incoming_messages",
+            description=(
+                "Read WhatsApp messages received through the Evolution API webhook. "
+                "Unread messages are returned by default."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "unread_only": {"type": "boolean", "default": True},
+                    "sender_phone": {"type": "string", "maxLength": 80},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+                },
+            },
+        ),
+        types.Tool(
+            name="acknowledge_incoming_messages",
+            description="Mark selected incoming WhatsApp messages as read.",
+            inputSchema={
+                "type": "object",
+                "required": ["message_ids"],
+                "properties": {
+                    "message_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "items": {"type": "string", "format": "uuid"},
+                    }
                 },
             },
         ),
@@ -502,6 +541,22 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
                     }
                 )
 
+            if name == "list_incoming_messages":
+                messages = await list_incoming_messages(
+                    unread_only=bool(args.get("unread_only", True)),
+                    sender_phone=_optional_text(args, "sender_phone"),
+                    limit=int(args.get("limit", 50)),
+                )
+                return _json_content({"count": len(messages), "messages": messages})
+
+            if name == "acknowledge_incoming_messages":
+                message_ids = args.get("message_ids")
+                if not isinstance(message_ids, list):
+                    raise ValueError("message_ids must be an array")
+                return _json_content(
+                    await acknowledge_incoming_messages([str(value) for value in message_ids])
+                )
+
             if name == "set_do_not_contact":
                 return _json_content(
                     await set_do_not_contact(
@@ -556,6 +611,23 @@ async def _send_json(
         }
     )
     await send({"type": "http.response.body", "body": body})
+
+
+async def _read_json_body(receive, *, max_bytes: int = 2_000_000) -> dict[str, Any]:
+    body = bytearray()
+    more_body = True
+    while more_body:
+        event = await receive()
+        if event.get("type") != "http.request":
+            continue
+        body.extend(event.get("body", b""))
+        if len(body) > max_bytes:
+            raise ValueError("request body is too large")
+        more_body = bool(event.get("more_body", False))
+    payload = json.loads(body or b"{}")
+    if not isinstance(payload, dict):
+        raise ValueError("request body must be a JSON object")
+    return payload
 
 
 def _request_is_authorized(scope: dict[str, Any]) -> bool:
@@ -613,6 +685,23 @@ async def _run_sse() -> None:
                     },
                 },
             )
+        elif path in {"/webhooks/evolution", "/webhooks/evolution/"} and method == "POST":
+            if not webhook_request_is_authorized(scope.get("headers", [])):
+                await _send_json(send, 401, {"status": "unauthorized"})
+                return
+            try:
+                payload = await _read_json_body(receive)
+                parsed = parse_evolution_message(payload)
+                if parsed is None:
+                    await _send_json(send, 200, {"status": "ignored"})
+                    return
+                result = await save_incoming_message(parsed)
+                await _send_json(send, 200, {"status": "accepted", **result})
+            except (json.JSONDecodeError, ValueError) as exc:
+                await _send_json(send, 400, {"status": "invalid_request", "error": str(exc)})
+            except Exception:
+                log.exception("Evolution webhook processing failed")
+                await _send_json(send, 500, {"status": "error"})
         elif path in {"/mcp", "/mcp/"}:
             if not _request_is_authorized(scope):
                 await _send_json(
@@ -654,6 +743,14 @@ async def _run_sse() -> None:
         log_level=settings.log_level.lower(),
     )
     async with streamable_http.run():
+        try:
+            webhook = await configure_evolution_webhook()
+            if webhook.get("configured"):
+                log.info("Evolution inbound webhook configured for %s", webhook["url"])
+            else:
+                log.warning("Evolution inbound webhook is inactive: %s", webhook.get("reason"))
+        except Exception as exc:
+            log.warning("Could not configure Evolution inbound webhook: %s", exc)
         await uvicorn.Server(config).serve()
 
 

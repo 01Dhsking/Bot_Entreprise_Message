@@ -20,6 +20,8 @@ disponible pour diagnostiquer visuellement les portails si leur structure change
 - `preview_targeted_messages` : voir exactement les destinataires et messages sans envoyer.
 - `send_targeted_messages` : envoyer au maximum 50 messages par appel apres confirmation explicite.
 - `list_contact_history` : enumerer les destinataires deja traites avec leurs informations.
+- `list_incoming_messages` : lire les reponses WhatsApp recues, non lues par defaut.
+- `acknowledge_incoming_messages` : marquer les reponses traitees comme lues.
 - `set_do_not_contact` : bloquer durablement les futurs envois pour une entreprise.
 - `list_scrape_runs` : auditer les collectes.
 - `health_check` et `close_browser`.
@@ -98,6 +100,8 @@ EVOLUTION_API_KEY=votre-cle
 EVOLUTION_API_INSTANCE=Solvexsolution
 EVOLUTION_API_DELAY_MS=123
 EVOLUTION_API_LINK_PREVIEW=true
+EVOLUTION_WEBHOOK_URL=https://bot-entreprise.example.com/webhooks/evolution
+EVOLUTION_WEBHOOK_SECRET=une-longue-valeur-aleatoire
 ```
 
 Les anciens numeros beninois a huit chiffres sont normalises vers le format international
@@ -106,6 +110,11 @@ et le contenu des messages soient chiffres pendant leur transport.
 
 Les valeurs sensibles ne doivent jamais etre ajoutees a `.env.example`, au Compose ou au depot.
 Le fichier `.env` est ignore par Git.
+
+Au demarrage, le service enregistre automatiquement le webhook `MESSAGES_UPSERT` dans Evolution
+API. Si `EVOLUTION_WEBHOOK_URL` est vide, l'URL est derivee de `ENTERPRISE_MESSAGE_HOST`. Le secret
+du webhook est envoye a Evolution dans l'en-tete `Authorization`; s'il est omis, `MCP_API_KEY` est
+utilise. Les messages entrants sont dedupliques et conserves dans PostgreSQL avant lecture MCP.
 
 ## Modeles de message
 
