@@ -53,3 +53,40 @@ def test_webhook_authentication(monkeypatch) -> None:
     assert webhook_request_is_authorized([(b"authorization", b"Bearer expected")])
     assert webhook_request_is_authorized([(b"x-evolution-webhook-secret", b"expected")])
     assert not webhook_request_is_authorized([(b"authorization", b"Bearer incorrect")])
+
+
+async def test_configure_webhook_uses_evolution_23_wrapper(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, endpoint, *, headers, json):
+            captured.update(endpoint=endpoint, headers=headers, json=json)
+            return FakeResponse()
+
+    monkeypatch.setattr(inbound.settings, "evolution_api_base_url", "https://evo.example.com")
+    monkeypatch.setattr(inbound.settings, "evolution_api_key", SecretStr("evolution-secret"))
+    monkeypatch.setattr(inbound.settings, "evolution_api_instance", "Solvexsolution")
+    monkeypatch.setattr(
+        inbound.settings,
+        "evolution_webhook_url",
+        "https://bot.example.com/webhooks/evolution",
+    )
+    monkeypatch.setattr(inbound.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+
+    result = await inbound.configure_evolution_webhook()
+
+    assert result["configured"] is True
+    assert captured["json"]["webhook"]["events"] == ["MESSAGES_UPSERT"]
+    assert captured["json"]["webhook"]["headers"] == {
+        "Authorization": "Bearer evolution-secret"
+    }

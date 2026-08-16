@@ -114,11 +114,15 @@ async def configure_evolution_webhook() -> dict[str, Any]:
         "apikey": settings.evolution_api_key.get_secret_value(),
     }
     payload = {
-        "enabled": True,
-        "url": webhook_url,
-        "events": ["MESSAGES_UPSERT"],
-        "headers": {"Authorization": f"Bearer {secret}"} if secret else {},
-        "base64": False,
+        "webhook": {
+            "enabled": True,
+            "url": webhook_url,
+            "events": ["MESSAGES_UPSERT"],
+            "headers": {"Authorization": f"Bearer {secret}"} if secret else {},
+            "base64": False,
+            "webhookByEvents": False,
+            "webhookBase64": False,
+        }
     }
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(endpoint, headers=headers, json=payload)
