@@ -362,16 +362,34 @@ async def queue_outbound_message(
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     async with SessionFactory() as session:
-        item = OutboundQueueItem(
-            contact_attempt_id=uuid.UUID(attempt_id),
-            kind=kind,
-            recipient=recipient,
-            body=body,
-            status="queued",
-            scheduled_at=scheduled_at,
-            metadata_json=metadata or {},
+        normalized_attempt_id = uuid.UUID(attempt_id)
+        item = await session.scalar(
+            select(OutboundQueueItem)
+            .where(
+                OutboundQueueItem.contact_attempt_id == normalized_attempt_id,
+                OutboundQueueItem.kind == kind,
+            )
+            .with_for_update()
         )
-        session.add(item)
+        if item and item.status == "sent":
+            raise AlreadyContactedError("This queued message was already sent")
+        if item and item.status in {"queued", "sending"}:
+            return {
+                "queue_item_id": str(item.id),
+                "status": item.status,
+                "scheduled_at": item.scheduled_at.isoformat(),
+            }
+        if item is None:
+            item = OutboundQueueItem(contact_attempt_id=normalized_attempt_id, kind=kind)
+            session.add(item)
+        item.recipient = recipient
+        item.body = body
+        item.status = "queued"
+        item.scheduled_at = scheduled_at
+        item.provider_message_id = None
+        item.error_message = None
+        item.metadata_json = metadata or {}
+        item.sent_at = None
         await session.commit()
         return {
             "queue_item_id": str(item.id),
