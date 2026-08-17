@@ -53,6 +53,7 @@ settings = get_settings()
 app = Server(settings.app_name)
 log = logging.getLogger(__name__)
 _tool_lock = asyncio.Lock()
+SERVICE_VERSION = "0.3.1"
 
 SOURCE_SCHEMA = {
     "type": "string",
@@ -461,6 +462,7 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
                     {
                         "status": "ok" if database.get("connected") else "degraded",
                         "service": settings.app_name,
+                        "version": SERVICE_VERSION,
                         "transport": settings.mcp_transport,
                         "database": database,
                         "repository": (
@@ -713,6 +715,7 @@ async def _run_sse() -> None:
                 {
                     "status": "ok" if database.get("connected") else "degraded",
                     "service": settings.app_name,
+                    "version": SERVICE_VERSION,
                     "database": database,
                     "providers": provider_status(),
                     "mcp_authentication": {
