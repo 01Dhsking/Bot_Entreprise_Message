@@ -35,7 +35,9 @@ from .outreach import (
 )
 from .registry_client import fetch_registry_page
 from .repository import (
+    ContactBlockedError,
     acknowledge_incoming_messages,
+    get_incoming_message,
     handle_permission_reply,
     list_companies,
     list_contact_history,
@@ -233,6 +235,24 @@ async def list_tools() -> list[types.Tool]:
                     "number": {"type": "string", "minLength": 6, "maxLength": 40},
                     "text": {"type": "string", "minLength": 1, "maxLength": 10000},
                     "confirm_send": {"type": "boolean", "const": True},
+                },
+            },
+        ),
+        types.Tool(
+            name="reply_to_incoming_message",
+            description=(
+                "Send a personalized WhatsApp reply to one incoming message and mark that "
+                "incoming message as read after a successful send. Use for human-like agent "
+                "follow-up on interested prospects, questions and objections."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["message_id", "text", "confirm_send"],
+                "properties": {
+                    "message_id": {"type": "string", "format": "uuid"},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    "confirm_send": {"type": "boolean", "const": True},
+                    "acknowledge": {"type": "boolean", "default": True},
                 },
             },
         ),
@@ -540,6 +560,38 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
                         "channel": "whatsapp",
                         "recipient": recipient,
                         "provider_message_id": message_id,
+                    }
+                )
+
+            if name == "reply_to_incoming_message":
+                if args.get("confirm_send") is not True:
+                    raise ValueError("confirm_send must be true before sending")
+                incoming = await get_incoming_message(str(args.get("message_id", "")))
+                if incoming is None:
+                    raise ValueError("Incoming message not found")
+                company = incoming.get("company") or {}
+                if company.get("do_not_contact"):
+                    raise ContactBlockedError("This company is marked as do not contact")
+                recipient = normalize_benin_phone(str(incoming.get("sender_phone") or ""))
+                if not recipient:
+                    raise ValueError("incoming message has no valid sender phone")
+                text = str(args.get("text", "")).strip()
+                if not text:
+                    raise ValueError("text cannot be empty")
+                message_id = await _send_evolution_api(recipient, text)
+                acknowledged = {"acknowledged": 0}
+                if bool(args.get("acknowledge", True)):
+                    acknowledged = await acknowledge_incoming_messages([incoming["id"]])
+                return _json_content(
+                    {
+                        "status": "sent",
+                        "channel": "whatsapp",
+                        "recipient": recipient,
+                        "incoming_message_id": incoming["id"],
+                        "sender_name": incoming.get("sender_name"),
+                        "company": company or None,
+                        "provider_message_id": message_id,
+                        **acknowledged,
                     }
                 )
 

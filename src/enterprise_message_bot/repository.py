@@ -717,6 +717,36 @@ async def list_incoming_messages(
         ]
 
 
+async def get_incoming_message(message_id: str | uuid.UUID) -> dict[str, Any] | None:
+    normalized_id = uuid.UUID(str(message_id))
+    statement = (
+        select(IncomingMessage, Company)
+        .outerjoin(Company, Company.id == IncomingMessage.company_id)
+        .where(IncomingMessage.id == normalized_id)
+    )
+    async with SessionFactory() as session:
+        row = (await session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        message, company = row
+        return {
+            "id": str(message.id),
+            "instance": message.instance,
+            "provider_message_id": message.provider_message_id,
+            "sender_phone": message.sender_phone,
+            "sender_name": message.sender_name,
+            "message_type": message.message_type,
+            "text": message.text,
+            "received_at": message.received_at.isoformat(),
+            "captured_at": message.captured_at.isoformat(),
+            "read_at": message.read_at.isoformat() if message.read_at else None,
+            "company": company_to_dict(company) if company else None,
+            "contact_attempt_id": (
+                str(message.contact_attempt_id) if message.contact_attempt_id else None
+            ),
+        }
+
+
 async def acknowledge_incoming_messages(message_ids: list[str]) -> dict[str, int]:
     normalized_ids = [uuid.UUID(value) for value in message_ids]
     if not normalized_ids:
