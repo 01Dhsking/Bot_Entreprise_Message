@@ -142,7 +142,10 @@ class IncomingMessage(Base):
     __tablename__ = "incoming_messages"
     __table_args__ = (
         UniqueConstraint(
-            "instance", "provider_message_id", name="uq_incoming_message_instance_provider_id"
+            "provider",
+            "instance",
+            "provider_message_id",
+            name="uq_incoming_message_provider_instance_id",
         ),
         Index("ix_incoming_messages_received_at", "received_at"),
         Index("ix_incoming_messages_read_at", "read_at"),
@@ -150,6 +153,7 @@ class IncomingMessage(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(30), nullable=False, default="evolution_api")
     company_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("companies.id", ondelete="SET NULL")
     )
@@ -197,3 +201,65 @@ class OutboundQueueItem(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WhatsAppConversation(Base):
+    __tablename__ = "whatsapp_conversations"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "session_name", "remote_jid", name="uq_whatsapp_conversation_address"
+        ),
+        Index("ix_whatsapp_conversations_updated", "updated_at"),
+        Index("ix_whatsapp_conversations_phone", "phone"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id", ondelete="SET NULL")
+    )
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    session_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    remote_jid: Mapped[str] = mapped_column(String(500), nullable=False)
+    phone: Mapped[str] = mapped_column(String(80), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(500))
+    mode: Mapped[str] = mapped_column(String(30), nullable=False, default="ai")
+    automatic_message_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    automatic_messages_sent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class WhatsAppConversationMessage(Base):
+    __tablename__ = "whatsapp_conversation_messages"
+    __table_args__ = (
+        Index("ix_whatsapp_conversation_messages_due", "status", "scheduled_at"),
+        Index("ix_whatsapp_conversation_messages_conversation", "conversation_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("whatsapp_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    direction: Mapped[str] = mapped_column(String(20), nullable=False)
+    source: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    text: Mapped[str | None] = mapped_column(Text)
+    provider_message_id: Mapped[str | None] = mapped_column(String(500))
+    in_reply_to_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("incoming_messages.id", ondelete="SET NULL")
+    )
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

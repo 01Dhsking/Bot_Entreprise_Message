@@ -69,6 +69,17 @@ class Settings(BaseSettings):
     enterprise_message_host: str | None = None
     evolution_webhook_url: str | None = None
     evolution_webhook_secret: SecretStr | None = None
+    waha_api_base_url: str | None = None
+    waha_api_key: SecretStr | None = None
+    waha_default_session: str = "default"
+    waha_sessions: str = "default"
+    waha_webhook_url: str | None = None
+    waha_webhook_secret: SecretStr | None = None
+    waha_polling_enabled: bool = True
+    waha_poll_interval_seconds: float = Field(default=5.0, ge=2, le=300)
+    fidelapp_presentation_path: Path = (
+        PROJECT_ROOT / "assets" / "FidelApp_Presentation_Commerciale_Canva.pptx"
+    )
     phone_country_code: str = "229"
     phone_national_prefix: str = "01"
 
@@ -77,8 +88,10 @@ class Settings(BaseSettings):
         if self.evolution_webhook_url and self.evolution_webhook_url.strip():
             return self.evolution_webhook_url.strip()
         if self.enterprise_message_host and self.enterprise_message_host.strip():
-            host = self.enterprise_message_host.strip().removeprefix("https://").removeprefix(
-                "http://"
+            host = (
+                self.enterprise_message_host.strip()
+                .removeprefix("https://")
+                .removeprefix("http://")
             )
             return f"https://{host.rstrip('/')}/webhooks/evolution"
         return None
@@ -87,6 +100,27 @@ class Settings(BaseSettings):
     def resolved_evolution_webhook_secret(self) -> str | None:
         secret = self.evolution_webhook_secret or self.evolution_api_key or self.mcp_api_key
         return secret.get_secret_value() if secret and secret.get_secret_value() else None
+
+    @property
+    def resolved_waha_webhook_url(self) -> str | None:
+        if self.waha_webhook_url and self.waha_webhook_url.strip():
+            return self.waha_webhook_url.strip()
+        if self.enterprise_message_host and self.enterprise_message_host.strip():
+            host = (
+                self.enterprise_message_host.strip()
+                .removeprefix("https://")
+                .removeprefix("http://")
+            )
+            return f"https://{host.rstrip('/')}/webhooks/waha"
+        return None
+
+    @property
+    def configured_waha_sessions(self) -> list[str]:
+        sessions = [value.strip() for value in self.waha_sessions.split(",") if value.strip()]
+        default = self.waha_default_session.strip()
+        return (
+            list(dict.fromkeys([default, *sessions])) if default else list(dict.fromkeys(sessions))
+        )
 
     @field_validator("mcp_transport")
     @classmethod
@@ -100,8 +134,8 @@ class Settings(BaseSettings):
     @classmethod
     def validate_whatsapp_provider(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"disabled", "evolution_api"}:
-            raise ValueError("WHATSAPP_PROVIDER must be 'disabled' or 'evolution_api'")
+        if normalized not in {"disabled", "evolution_api", "waha"}:
+            raise ValueError("WHATSAPP_PROVIDER must be 'disabled', 'evolution_api' or 'waha'")
         return normalized
 
     @field_validator("database_url", mode="before")

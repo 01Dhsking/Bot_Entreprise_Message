@@ -7,6 +7,7 @@ from sqlalchemy import and_, desc, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
+from .config import get_settings
 from .conversation import campaign_delay_seconds, classify_permission_reply
 from .database import SessionFactory
 from .models import (
@@ -16,8 +17,24 @@ from .models import (
     OutboundQueueItem,
     PageSnapshot,
     ScrapeRun,
+    WhatsAppConversation,
+    WhatsAppConversationMessage,
 )
 from .schemas import RegistryCompany, RegistryPage, parse_registry_date
+
+settings = get_settings()
+
+FIDELAPP_OFFER_MESSAGE = (
+    "Je m'appelle Ulrich, je suis de FidelApp, une société qui aide les boutiques et "
+    "magasins à booster leurs ventes drastiquement. J'ai une offre pour vous, voulez-vous "
+    "l'écouter ?"
+)
+FIDELAPP_PRESENTATION_CAPTION = (
+    "Voici le tout nouvel outil qui marche très bien en ce moment avec les magasins "
+    "avec lesquels nous collaborons déjà.\n\n"
+    "FidelApp vous aide simplement à transformer les clients qui viennent une fois "
+    "chez vous en clients qui reviennent régulièrement."
+)
 
 
 class ContactBlockedError(RuntimeError):
@@ -413,9 +430,7 @@ async def next_whatsapp_campaign_start() -> datetime:
 async def outbound_dispatch_wait_seconds() -> float:
     async with SessionFactory() as session:
         latest_sent = await session.scalar(
-            select(func.max(OutboundQueueItem.sent_at)).where(
-                OutboundQueueItem.status == "sent"
-            )
+            select(func.max(OutboundQueueItem.sent_at)).where(OutboundQueueItem.status == "sent")
         )
         sent_count = await session.scalar(
             select(func.count())
@@ -452,6 +467,8 @@ async def claim_next_outbound_message() -> dict[str, Any] | None:
             "kind": item.kind,
             "recipient": item.recipient,
             "body": item.body,
+            "provider": (item.metadata_json or {}).get("provider"),
+            "session": (item.metadata_json or {}).get("session"),
         }
 
 
@@ -486,11 +503,49 @@ async def complete_outbound_message(
             metadata["conversation_stage"] = "follow_up_sent" if success else "follow_up_failed"
             metadata["follow_up_provider_message_id"] = provider_message_id
             metadata["follow_up_error"] = error_message
+        if success:
+            item_metadata = dict(item.metadata_json or {})
+            provider = str(item_metadata.get("provider") or "").strip()
+            session_name = str(item_metadata.get("session") or "").strip()
+            if provider and session_name:
+                remote_suffix = "@c.us" if provider == "waha" else "@s.whatsapp.net"
+                conversation = await _get_or_create_conversation(
+                    session,
+                    provider=provider,
+                    session_name=session_name,
+                    remote_jid=f"{item.recipient}{remote_suffix}",
+                    phone=item.recipient,
+                    company_id=attempt.company_id,
+                )
+                conversation.automatic_messages_sent = min(
+                    conversation.automatic_messages_sent + 1,
+                    conversation.automatic_message_limit,
+                )
+                if conversation.automatic_messages_sent >= conversation.automatic_message_limit:
+                    conversation.mode = "ai"
+                session.add(
+                    WhatsAppConversationMessage(
+                        conversation_id=conversation.id,
+                        direction="outgoing",
+                        source="automatic",
+                        status="sent",
+                        text=item.body,
+                        provider_message_id=provider_message_id,
+                        sent_at=now,
+                        metadata_json={"kind": item.kind},
+                    )
+                )
         attempt.metadata_json = metadata
         await session.commit()
 
 
-async def handle_permission_reply(sender_phone: str | None, text: str | None) -> dict[str, Any]:
+async def handle_permission_reply(
+    sender_phone: str | None,
+    text: str | None,
+    *,
+    provider: str | None = None,
+    session_name: str | None = None,
+) -> dict[str, Any]:
     if not sender_phone:
         return {"action": "ignored", "reason": "sender phone is unavailable"}
     async with SessionFactory() as session:
@@ -508,6 +563,12 @@ async def handle_permission_reply(sender_phone: str | None, text: str | None) ->
         if attempt is None:
             return {"action": "ignored", "reason": "no matching WhatsApp campaign"}
         metadata = dict(attempt.metadata_json or {})
+        expected_provider = metadata.get("provider")
+        expected_session = metadata.get("session")
+        if expected_provider and provider and expected_provider != provider:
+            return {"action": "ignored", "reason": "campaign belongs to another provider"}
+        if expected_session and session_name and expected_session != session_name:
+            return {"action": "ignored", "reason": "campaign belongs to another session"}
         if metadata.get("conversation_stage") != "awaiting_permission":
             return {"action": "ignored", "reason": "campaign is not awaiting permission"}
 
@@ -538,7 +599,11 @@ async def handle_permission_reply(sender_phone: str | None, text: str | None) ->
                         body=follow_up_body,
                         status="queued",
                         scheduled_at=datetime.now(UTC),
-                        metadata_json={"trigger": "positive_permission_reply"},
+                        metadata_json={
+                            "trigger": "positive_permission_reply",
+                            "provider": provider or expected_provider,
+                            "session": session_name or expected_session,
+                        },
                     )
                 )
                 metadata["conversation_stage"] = "follow_up_queued"
@@ -617,7 +682,9 @@ async def repository_stats() -> dict[str, int]:
         )
         incoming_count = await session.scalar(select(func.count()).select_from(IncomingMessage))
         unread_count = await session.scalar(
-            select(func.count()).select_from(IncomingMessage).where(IncomingMessage.read_at.is_(None))
+            select(func.count())
+            .select_from(IncomingMessage)
+            .where(IncomingMessage.read_at.is_(None))
         )
         queued_count = await session.scalar(
             select(func.count())
@@ -639,6 +706,7 @@ async def save_incoming_message(message: dict[str, Any]) -> dict[str, Any]:
     async with SessionFactory() as session:
         existing = await session.scalar(
             select(IncomingMessage).where(
+                IncomingMessage.provider == message.get("provider", "evolution_api"),
                 IncomingMessage.instance == message["instance"],
                 IncomingMessage.provider_message_id == message["provider_message_id"],
             )
@@ -664,12 +732,33 @@ async def save_incoming_message(message: dict[str, Any]) -> dict[str, Any]:
             **message,
         )
         session.add(incoming)
+        conversation = await _get_or_create_conversation(
+            session,
+            provider=str(message.get("provider") or "evolution_api"),
+            session_name=message["instance"],
+            remote_jid=message["remote_jid"],
+            phone=str(sender_phone or ""),
+            display_name=message.get("sender_name"),
+            company_id=attempt.company_id if attempt else None,
+        )
+        session.add(
+            WhatsAppConversationMessage(
+                conversation_id=conversation.id,
+                direction="incoming",
+                source="customer",
+                status="received",
+                text=message.get("text"),
+                provider_message_id=message["provider_message_id"],
+                metadata_json={"message_type": message.get("message_type", "unknown")},
+            )
+        )
         try:
             await session.commit()
         except IntegrityError:
             await session.rollback()
             duplicate = await session.scalar(
                 select(IncomingMessage).where(
+                    IncomingMessage.provider == message.get("provider", "evolution_api"),
                     IncomingMessage.instance == message["instance"],
                     IncomingMessage.provider_message_id == message["provider_message_id"],
                 )
@@ -677,7 +766,11 @@ async def save_incoming_message(message: dict[str, Any]) -> dict[str, Any]:
             if duplicate:
                 return {"message_id": str(duplicate.id), "created": False}
             raise
-        return {"message_id": str(incoming.id), "created": True}
+        return {
+            "message_id": str(incoming.id),
+            "conversation_id": str(conversation.id),
+            "created": True,
+        }
 
 
 async def list_incoming_messages(
@@ -699,6 +792,7 @@ async def list_incoming_messages(
         return [
             {
                 "id": str(message.id),
+                "provider": message.provider,
                 "instance": message.instance,
                 "provider_message_id": message.provider_message_id,
                 "sender_phone": message.sender_phone,
@@ -731,6 +825,7 @@ async def get_incoming_message(message_id: str | uuid.UUID) -> dict[str, Any] | 
         message, company = row
         return {
             "id": str(message.id),
+            "provider": message.provider,
             "instance": message.instance,
             "provider_message_id": message.provider_message_id,
             "sender_phone": message.sender_phone,
@@ -745,6 +840,476 @@ async def get_incoming_message(message_id: str | uuid.UUID) -> dict[str, Any] | 
                 str(message.contact_attempt_id) if message.contact_attempt_id else None
             ),
         }
+
+
+async def _get_or_create_conversation(
+    session,
+    *,
+    provider: str,
+    session_name: str,
+    remote_jid: str,
+    phone: str,
+    display_name: str | None = None,
+    company_id: uuid.UUID | None = None,
+) -> WhatsAppConversation:
+    conversation = await session.scalar(
+        select(WhatsAppConversation).where(
+            WhatsAppConversation.provider == provider,
+            WhatsAppConversation.session_name == session_name,
+            WhatsAppConversation.remote_jid == remote_jid,
+        )
+    )
+    if conversation is None:
+        conversation = WhatsAppConversation(
+            provider=provider,
+            session_name=session_name,
+            remote_jid=remote_jid,
+            phone=phone,
+            display_name=display_name,
+            company_id=company_id,
+        )
+        session.add(conversation)
+        await session.flush()
+    else:
+        conversation.display_name = display_name or conversation.display_name
+        conversation.company_id = company_id or conversation.company_id
+        conversation.updated_at = datetime.now(UTC)
+    return conversation
+
+
+async def record_whatsapp_outbound(
+    *,
+    provider: str,
+    session_name: str,
+    phone: str,
+    text: str,
+    provider_message_id: str,
+    source: str,
+    incoming_message_id: str | None = None,
+) -> dict[str, str]:
+    remote_jid = f"{phone}@c.us" if provider == "waha" else f"{phone}@s.whatsapp.net"
+    async with SessionFactory() as session:
+        conversation = await _get_or_create_conversation(
+            session,
+            provider=provider,
+            session_name=session_name,
+            remote_jid=remote_jid,
+            phone=phone,
+        )
+        item = WhatsAppConversationMessage(
+            conversation_id=conversation.id,
+            direction="outgoing",
+            source=source,
+            status="sent",
+            text=text,
+            provider_message_id=provider_message_id,
+            in_reply_to_message_id=(
+                uuid.UUID(incoming_message_id) if incoming_message_id else None
+            ),
+            sent_at=datetime.now(UTC),
+            metadata_json={},
+        )
+        session.add(item)
+        await session.commit()
+        return {"conversation_id": str(conversation.id), "conversation_message_id": str(item.id)}
+
+
+async def list_whatsapp_conversations(limit: int = 50) -> list[dict[str, Any]]:
+    statement = (
+        select(WhatsAppConversation, Company)
+        .outerjoin(Company, Company.id == WhatsAppConversation.company_id)
+        .order_by(desc(WhatsAppConversation.updated_at))
+        .limit(min(max(limit, 1), 200))
+    )
+    async with SessionFactory() as session:
+        rows = (await session.execute(statement)).all()
+        return [
+            {
+                "id": str(conversation.id),
+                "provider": conversation.provider,
+                "session": conversation.session_name,
+                "phone": conversation.phone,
+                "display_name": conversation.display_name,
+                "mode": conversation.mode,
+                "automatic_message_limit": conversation.automatic_message_limit,
+                "automatic_messages_sent": conversation.automatic_messages_sent,
+                "status": conversation.status,
+                "metadata": dict(conversation.metadata_json or {}),
+                "updated_at": conversation.updated_at.isoformat(),
+                "company": company_to_dict(company) if company else None,
+            }
+            for conversation, company in rows
+        ]
+
+
+async def get_whatsapp_conversation(conversation_id: str, limit: int = 100) -> dict[str, Any]:
+    normalized_id = uuid.UUID(conversation_id)
+    async with SessionFactory() as session:
+        conversation = await session.get(WhatsAppConversation, normalized_id)
+        if conversation is None:
+            raise ValueError("WhatsApp conversation not found")
+        messages = (
+            await session.scalars(
+                select(WhatsAppConversationMessage)
+                .where(WhatsAppConversationMessage.conversation_id == normalized_id)
+                .order_by(WhatsAppConversationMessage.created_at)
+                .limit(min(max(limit, 1), 500))
+            )
+        ).all()
+        return {
+            "id": str(conversation.id),
+            "provider": conversation.provider,
+            "session": conversation.session_name,
+            "phone": conversation.phone,
+            "display_name": conversation.display_name,
+            "mode": conversation.mode,
+            "automatic_message_limit": conversation.automatic_message_limit,
+            "automatic_messages_sent": conversation.automatic_messages_sent,
+            "status": conversation.status,
+            "metadata": dict(conversation.metadata_json or {}),
+            "messages": [
+                {
+                    "id": str(message.id),
+                    "direction": message.direction,
+                    "source": message.source,
+                    "status": message.status,
+                    "text": message.text,
+                    "scheduled_at": message.scheduled_at.isoformat()
+                    if message.scheduled_at
+                    else None,
+                    "sent_at": message.sent_at.isoformat() if message.sent_at else None,
+                    "created_at": message.created_at.isoformat(),
+                    "error": message.error_message,
+                }
+                for message in messages
+            ],
+        }
+
+
+async def list_pollable_waha_conversations() -> list[dict[str, Any]]:
+    statement = select(WhatsAppConversation).where(
+        WhatsAppConversation.provider == "waha",
+        WhatsAppConversation.status == "active",
+        WhatsAppConversation.mode != "paused",
+    )
+    async with SessionFactory() as session:
+        conversations = (await session.scalars(statement)).all()
+        return [
+            {
+                "id": str(conversation.id),
+                "session": conversation.session_name,
+                "phone": conversation.phone,
+                "remote_jid": conversation.remote_jid,
+                "created_at": conversation.created_at,
+            }
+            for conversation in conversations
+        ]
+
+
+async def plan_whatsapp_message(
+    *,
+    conversation_id: str,
+    text: str,
+    source: str,
+    scheduled_at: datetime | None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if source not in {"prewritten", "ai_suggested", "human"}:
+        raise ValueError("source must be prewritten, ai_suggested or human")
+    async with SessionFactory() as session:
+        conversation = await session.get(WhatsAppConversation, uuid.UUID(conversation_id))
+        if conversation is None:
+            raise ValueError("WhatsApp conversation not found")
+        status = "scheduled" if scheduled_at else "draft"
+        item = WhatsAppConversationMessage(
+            conversation_id=conversation.id,
+            direction="outgoing",
+            source=source,
+            status=status,
+            text=text,
+            scheduled_at=scheduled_at,
+            metadata_json=metadata or {},
+        )
+        session.add(item)
+        await session.commit()
+        return {
+            "message_id": str(item.id),
+            "conversation_id": str(conversation.id),
+            "status": status,
+            "scheduled_at": scheduled_at.isoformat() if scheduled_at else None,
+        }
+
+
+async def start_fidelapp_sales_sequence(
+    *,
+    phone: str,
+    company_name: str,
+    provider: str,
+    session_name: str,
+) -> dict[str, Any]:
+    remote_suffix = "@c.us" if provider == "waha" else "@s.whatsapp.net"
+    first_message = (
+        f"Bonjour, suis-je bien chez {company_name.strip()} ?"
+        if company_name.strip()
+        else "Bonjour, suis-je bien chez vous ?"
+    )
+    async with SessionFactory() as session:
+        conversation = await _get_or_create_conversation(
+            session,
+            provider=provider,
+            session_name=session_name,
+            remote_jid=f"{phone}{remote_suffix}",
+            phone=phone,
+        )
+        conversation.mode = "automatic"
+        conversation.automatic_message_limit = 3
+        conversation.automatic_messages_sent = 0
+        conversation.status = "active"
+        conversation.metadata_json = {
+            "sequence": "fidelapp_sales",
+            "stage": "opener_queued",
+            "company_name": company_name.strip() or None,
+        }
+        item = WhatsAppConversationMessage(
+            conversation_id=conversation.id,
+            direction="outgoing",
+            source="prewritten",
+            status="scheduled",
+            text=first_message,
+            scheduled_at=datetime.now(UTC),
+            metadata_json={"stage_after_send": "awaiting_identity_reply"},
+        )
+        session.add(item)
+        await session.commit()
+        return {
+            "conversation_id": str(conversation.id),
+            "message_id": str(item.id),
+            "status": "scheduled",
+            "provider": provider,
+            "session": session_name,
+            "recipient": phone,
+            "text": first_message,
+        }
+
+
+async def resume_fidelapp_sales_sequence(
+    *,
+    phone: str,
+    company_name: str,
+    provider: str,
+    session_name: str,
+) -> dict[str, Any]:
+    remote_suffix = "@c.us" if provider == "waha" else "@s.whatsapp.net"
+    async with SessionFactory() as session:
+        conversation = await _get_or_create_conversation(
+            session,
+            provider=provider,
+            session_name=session_name,
+            remote_jid=f"{phone}{remote_suffix}",
+            phone=phone,
+        )
+        conversation.mode = "ai"
+        conversation.status = "active"
+        conversation.metadata_json = {
+            "sequence": "fidelapp_sales",
+            "stage": "ai_active",
+            "company_name": company_name.strip() or None,
+        }
+        await session.commit()
+        return {
+            "conversation_id": str(conversation.id),
+            "status": "resumed",
+            "provider": provider,
+            "session": session_name,
+            "recipient": phone,
+            "stage": "ai_active",
+        }
+
+
+async def advance_fidelapp_sales_sequence(conversation_id: str, text: str | None) -> dict[str, Any]:
+    async with SessionFactory() as session:
+        conversation = await session.get(WhatsAppConversation, uuid.UUID(conversation_id))
+        if conversation is None:
+            return {"action": "ignored", "reason": "conversation not found"}
+        sequence = dict(conversation.metadata_json or {})
+        if sequence.get("sequence") != "fidelapp_sales":
+            return {"action": "ignored", "reason": "not a FidelApp sales sequence"}
+        stage = sequence.get("stage")
+        classification = classify_permission_reply(text)
+        if classification == "opt_out":
+            conversation.mode = "paused"
+            conversation.status = "opted_out"
+            sequence["stage"] = "opted_out"
+            conversation.metadata_json = sequence
+            if conversation.company_id:
+                company = await session.get(Company, conversation.company_id)
+                if company:
+                    company.do_not_contact = True
+                    company.contact_notes = "WhatsApp opt-out received"
+            await session.commit()
+            return {"action": "opt_out", "stage": "opted_out"}
+
+        if stage == "awaiting_identity_reply":
+            item = WhatsAppConversationMessage(
+                conversation_id=conversation.id,
+                direction="outgoing",
+                source="prewritten",
+                status="scheduled",
+                text=FIDELAPP_OFFER_MESSAGE,
+                scheduled_at=datetime.now(UTC),
+                metadata_json={"stage_after_send": "awaiting_offer_reply"},
+            )
+            session.add(item)
+            sequence["stage"] = "offer_queued"
+            action = "offer_queued"
+        elif stage == "awaiting_offer_reply":
+            if classification == "negative":
+                conversation.mode = "paused"
+                conversation.status = "declined"
+                sequence["stage"] = "offer_declined"
+                action = "negative"
+            elif classification == "positive":
+                item = WhatsAppConversationMessage(
+                    conversation_id=conversation.id,
+                    direction="outgoing",
+                    source="prewritten",
+                    status="scheduled",
+                    text=FIDELAPP_PRESENTATION_CAPTION,
+                    scheduled_at=datetime.now(UTC),
+                    metadata_json={
+                        "stage_after_send": "awaiting_ai_handoff_reply",
+                        "attachment_path": str(settings.fidelapp_presentation_path),
+                    },
+                )
+                session.add(item)
+                sequence["stage"] = "presentation_queued"
+                action = "presentation_queued"
+            else:
+                action = "awaiting_clear_offer_reply"
+        elif stage == "awaiting_ai_handoff_reply":
+            conversation.mode = "ai"
+            sequence["stage"] = "ai_active"
+            action = "ai_handoff"
+        else:
+            return {"action": "ignored", "stage": stage}
+        conversation.metadata_json = sequence
+        await session.commit()
+        return {"action": action, "stage": sequence.get("stage")}
+
+
+async def update_planned_whatsapp_message(
+    message_id: str, *, action: str, scheduled_at: datetime | None = None
+) -> dict[str, Any]:
+    if action not in {"approve", "cancel"}:
+        raise ValueError("action must be approve or cancel")
+    async with SessionFactory() as session:
+        item = await session.get(WhatsAppConversationMessage, uuid.UUID(message_id))
+        if item is None or item.direction != "outgoing":
+            raise ValueError("Planned WhatsApp message not found")
+        if item.status not in {"draft", "scheduled"}:
+            raise ValueError(f"Message cannot be changed from status {item.status}")
+        item.status = "cancelled" if action == "cancel" else "scheduled"
+        item.scheduled_at = None if action == "cancel" else (scheduled_at or datetime.now(UTC))
+        await session.commit()
+        return {"message_id": str(item.id), "status": item.status}
+
+
+async def set_whatsapp_conversation_mode(
+    conversation_id: str, *, mode: str, automatic_message_limit: int | None = None
+) -> dict[str, Any]:
+    if mode not in {"automatic", "ai", "human", "paused"}:
+        raise ValueError("mode must be automatic, ai, human or paused")
+    async with SessionFactory() as session:
+        conversation = await session.get(WhatsAppConversation, uuid.UUID(conversation_id))
+        if conversation is None:
+            raise ValueError("WhatsApp conversation not found")
+        conversation.mode = mode
+        if automatic_message_limit is not None:
+            conversation.automatic_message_limit = min(max(automatic_message_limit, 0), 2)
+        await session.commit()
+        return {
+            "conversation_id": str(conversation.id),
+            "mode": conversation.mode,
+            "automatic_message_limit": conversation.automatic_message_limit,
+        }
+
+
+async def claim_next_planned_whatsapp_message() -> dict[str, Any] | None:
+    async with SessionFactory() as session:
+        item = await session.scalar(
+            select(WhatsAppConversationMessage)
+            .where(
+                WhatsAppConversationMessage.status == "scheduled",
+                WhatsAppConversationMessage.scheduled_at <= datetime.now(UTC),
+            )
+            .order_by(WhatsAppConversationMessage.scheduled_at)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if item is None:
+            return None
+        conversation = await session.get(WhatsAppConversation, item.conversation_id)
+        if conversation is None or conversation.mode == "paused":
+            return None
+        if (
+            item.source == "prewritten"
+            and conversation.mode == "automatic"
+            and conversation.automatic_messages_sent >= conversation.automatic_message_limit
+        ):
+            item.status = "draft"
+            conversation.mode = "ai"
+            await session.commit()
+            return None
+        item.status = "sending"
+        await session.commit()
+        return {
+            "id": str(item.id),
+            "provider": conversation.provider,
+            "session": conversation.session_name,
+            "recipient": conversation.phone,
+            "body": item.text or "",
+            "metadata": dict(item.metadata_json or {}),
+        }
+
+
+async def complete_planned_whatsapp_message(
+    message_id: str,
+    *,
+    success: bool,
+    provider_message_id: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    async with SessionFactory() as session:
+        item = await session.get(WhatsAppConversationMessage, uuid.UUID(message_id))
+        if item is None:
+            raise ValueError("Planned WhatsApp message not found")
+        item.status = "sent" if success else "failed"
+        item.provider_message_id = provider_message_id
+        item.error_message = error_message
+        item.sent_at = datetime.now(UTC) if success else None
+        if success and item.source == "prewritten":
+            conversation = await session.get(WhatsAppConversation, item.conversation_id)
+            if conversation and conversation.mode == "automatic":
+                conversation.automatic_messages_sent = min(
+                    conversation.automatic_messages_sent + 1,
+                    conversation.automatic_message_limit,
+                )
+                is_fidelapp_sequence = (conversation.metadata_json or {}).get("sequence") == (
+                    "fidelapp_sales"
+                )
+                if (
+                    not is_fidelapp_sequence
+                    and conversation.automatic_messages_sent >= conversation.automatic_message_limit
+                ):
+                    conversation.mode = "ai"
+        if success:
+            conversation = await session.get(WhatsAppConversation, item.conversation_id)
+            next_stage = (item.metadata_json or {}).get("stage_after_send")
+            if conversation and next_stage:
+                sequence = dict(conversation.metadata_json or {})
+                sequence["stage"] = next_stage
+                conversation.metadata_json = sequence
+        await session.commit()
 
 
 async def acknowledge_incoming_messages(message_ids: list[str]) -> dict[str, int]:

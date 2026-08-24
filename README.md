@@ -112,6 +112,40 @@ et le contenu des messages soient chiffres pendant leur transport.
 Les valeurs sensibles ne doivent jamais etre ajoutees a `.env.example`, au Compose ou au depot.
 Le fichier `.env` est ignore par Git.
 
+### WAHA et plusieurs numeros
+
+WAHA peut etre utilise comme fournisseur principal tout en conservant l'adaptateur Evolution :
+
+```dotenv
+WHATSAPP_PROVIDER=waha
+WAHA_API_BASE_URL=https://waha.example.com
+WAHA_API_KEY=cle-api-waha
+WAHA_DEFAULT_SESSION=default
+WAHA_SESSIONS=default,commercial-2
+WAHA_WEBHOOK_URL=https://bot-entreprise.example.com/webhooks/waha
+WAHA_WEBHOOK_SECRET=une-longue-valeur-aleatoire
+WAHA_POLLING_ENABLED=true
+```
+
+Chaque numero WAHA doit avoir sa propre session. Dans le Dashboard WAHA, configurer pour chaque
+session un webhook `message` vers `WAHA_WEBHOOK_URL` et l'en-tete personnalise
+`X-WAHA-Webhook-Secret` avec la valeur `WAHA_WEBHOOK_SECRET`. Les reponses sont ensuite envoyees
+avec le fournisseur et la session du message entrant; un numero ne peut donc pas repondre a la
+place d'un autre.
+
+Quand aucune URL publique de webhook n'est disponible, le poller WAHA persistant lit les nouveaux
+messages des conversations actives. Il est active par defaut et ignore l'historique anterieur a la
+creation ou a la reprise d'une conversation.
+
+Les discussions et leur historique sont persistants. Un message `ai_suggested` peut rester en
+brouillon, etre approuve immediatement ou programme. Le worker n'envoie que les elements au statut
+`scheduled`. Le mode `automatic` est limite a deux messages; la suite doit passer en mode `ai` ou
+`human`. Le mode `paused` bloque les messages planifies de la discussion.
+
+Outils MCP associes : `list_whatsapp_sessions`, `list_whatsapp_conversations`,
+`get_whatsapp_conversation`, `plan_whatsapp_message`, `update_planned_whatsapp_message` et
+`set_whatsapp_conversation_mode`.
+
 Au demarrage, le service enregistre automatiquement le webhook `MESSAGES_UPSERT` dans Evolution
 API. Si `EVOLUTION_WEBHOOK_URL` est vide, l'URL est derivee de `ENTERPRISE_MESSAGE_HOST`. Le secret
 du webhook est envoye a Evolution dans l'en-tete `Authorization`; s'il est omis, la cle Evolution

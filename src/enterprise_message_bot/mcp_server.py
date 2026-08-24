@@ -20,13 +20,16 @@ from .conversation import campaign_delay_seconds
 from .database import close_database, database_health
 from .dispatcher import run_outbound_dispatcher
 from .inbound import (
+    advance_incoming_conversation,
     configure_evolution_webhook,
     parse_evolution_message,
+    parse_waha_message,
+    run_waha_inbound_poller,
+    waha_webhook_request_is_authorized,
     webhook_request_is_authorized,
 )
 from .logging_config import configure_logging
 from .outreach import (
-    _send_evolution_api,
     _send_smtp,
     normalize_benin_phone,
     preview_message,
@@ -38,24 +41,32 @@ from .repository import (
     ContactBlockedError,
     acknowledge_incoming_messages,
     get_incoming_message,
-    handle_permission_reply,
+    get_whatsapp_conversation,
     list_companies,
     list_contact_history,
     list_incoming_messages,
     list_runs,
+    list_whatsapp_conversations,
     next_whatsapp_campaign_start,
+    plan_whatsapp_message,
+    record_whatsapp_outbound,
     repository_stats,
+    resume_fidelapp_sales_sequence,
     save_incoming_message,
     save_registry_page,
     saved_page_numbers,
     set_do_not_contact,
+    set_whatsapp_conversation_mode,
+    start_fidelapp_sales_sequence,
+    update_planned_whatsapp_message,
 )
+from .whatsapp import configure_waha_webhooks, list_waha_sessions, send_whatsapp
 
 settings = get_settings()
 app = Server(settings.app_name)
 log = logging.getLogger(__name__)
 _tool_lock = asyncio.Lock()
-SERVICE_VERSION = "0.3.1"
+SERVICE_VERSION = "0.5.0"
 
 SOURCE_SCHEMA = {
     "type": "string",
@@ -85,6 +96,17 @@ def _optional_date(args: dict[str, Any], name: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"{name} must use YYYY-MM-DD") from exc
+
+
+def _optional_datetime(args: dict[str, Any], name: str) -> datetime | None:
+    value = _optional_text(args, name)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must use ISO 8601") from exc
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _target_filters(args: dict[str, Any], *, channel: str | None = None) -> dict[str, Any]:
@@ -234,7 +256,130 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "number": {"type": "string", "minLength": 6, "maxLength": 40},
                     "text": {"type": "string", "minLength": 1, "maxLength": 10000},
+                    "provider": {"type": "string", "enum": ["evolution_api", "waha"]},
+                    "session": {"type": "string", "minLength": 1, "maxLength": 200},
                     "confirm_send": {"type": "boolean", "const": True},
+                },
+            },
+        ),
+        types.Tool(
+            name="list_whatsapp_sessions",
+            description="List the WhatsApp numbers/sessions currently known by WAHA.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="start_fidelapp_sales_sequence",
+            description=(
+                "Start the approved FidelApp store outreach sequence. Sends only the personalized "
+                "identity opener, then waits for inbound replies before each next step."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["number", "company_name", "confirm_send"],
+                "properties": {
+                    "number": {"type": "string", "minLength": 6, "maxLength": 40},
+                    "company_name": {"type": "string", "maxLength": 500},
+                    "provider": {
+                        "type": "string",
+                        "enum": ["evolution_api", "waha"],
+                        "default": "waha",
+                    },
+                    "session": {"type": "string", "default": "default", "maxLength": 200},
+                    "confirm_send": {"type": "boolean", "const": True},
+                },
+            },
+        ),
+        types.Tool(
+            name="resume_fidelapp_sales_sequence",
+            description=(
+                "Adopt an existing FidelApp WhatsApp discussion directly in AI mode without "
+                "sending or repeating any onboarding message."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["number", "company_name", "confirm"],
+                "properties": {
+                    "number": {"type": "string", "minLength": 6, "maxLength": 40},
+                    "company_name": {"type": "string", "maxLength": 500},
+                    "provider": {
+                        "type": "string",
+                        "enum": ["evolution_api", "waha"],
+                        "default": "waha",
+                    },
+                    "session": {"type": "string", "default": "default", "maxLength": 200},
+                    "confirm": {"type": "boolean", "const": True},
+                },
+            },
+        ),
+        types.Tool(
+            name="list_whatsapp_conversations",
+            description="List persistent conversations across all WhatsApp numbers and providers.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}
+                },
+            },
+        ),
+        types.Tool(
+            name="get_whatsapp_conversation",
+            description="Read one conversation and its complete ordered message history.",
+            inputSchema={
+                "type": "object",
+                "required": ["conversation_id"],
+                "properties": {
+                    "conversation_id": {"type": "string", "format": "uuid"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100},
+                },
+            },
+        ),
+        types.Tool(
+            name="plan_whatsapp_message",
+            description=(
+                "Preview or save a prewritten, human, or AI-suggested reply. Without a date it "
+                "remains a draft; with a date it is scheduled. confirm must be true to persist it."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["conversation_id", "text", "source", "confirm"],
+                "properties": {
+                    "conversation_id": {"type": "string", "format": "uuid"},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    "source": {"type": "string", "enum": ["prewritten", "ai_suggested", "human"]},
+                    "scheduled_at": {"type": "string", "format": "date-time"},
+                    "confirm": {"type": "boolean"},
+                },
+            },
+        ),
+        types.Tool(
+            name="update_planned_whatsapp_message",
+            description="Approve/schedule or cancel a WhatsApp draft. confirm must be true.",
+            inputSchema={
+                "type": "object",
+                "required": ["message_id", "action", "confirm"],
+                "properties": {
+                    "message_id": {"type": "string", "format": "uuid"},
+                    "action": {"type": "string", "enum": ["approve", "cancel"]},
+                    "scheduled_at": {"type": "string", "format": "date-time"},
+                    "confirm": {"type": "boolean", "const": True},
+                },
+            },
+        ),
+        types.Tool(
+            name="set_whatsapp_conversation_mode",
+            description=(
+                "Choose automatic onboarding, AI-agent, human, or paused mode. "
+                "Automatic onboarding "
+                "is strictly capped at two messages."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["conversation_id", "mode", "confirm"],
+                "properties": {
+                    "conversation_id": {"type": "string", "format": "uuid"},
+                    "mode": {"type": "string", "enum": ["automatic", "ai", "human", "paused"]},
+                    "automatic_message_limit": {"type": "integer", "minimum": 0, "maximum": 2},
+                    "confirm": {"type": "boolean", "const": True},
                 },
             },
         ),
@@ -295,7 +440,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="list_incoming_messages",
             description=(
-                "Read WhatsApp messages received through the Evolution API webhook. "
+                "Read WhatsApp messages received through Evolution API or WAHA. "
                 "Unread messages are returned by default."
             ),
             inputSchema={
@@ -310,7 +455,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="configure_incoming_webhook",
             description=(
-                "Reconnect the Evolution API MESSAGES_UPSERT webhook to this persistent inbox."
+                "Reconnect the Evolution API webhook. WAHA webhooks are configured per session."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -464,9 +609,7 @@ async def _campaign(args: dict[str, Any], *, send: bool) -> dict[str, Any]:
         "matched": len(companies),
         "sent": sum(1 for result in results if result.get("status") == "sent"),
         "queued": sum(1 for result in results if result.get("status") == "queued"),
-        "not_sent": sum(
-            1 for result in results if result.get("status") not in {"sent", "queued"}
-        ),
+        "not_sent": sum(1 for result in results if result.get("status") not in {"sent", "queued"}),
         "results": results,
     }
 
@@ -553,14 +696,129 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
                 text = str(args.get("text", "")).strip()
                 if not text:
                     raise ValueError("text cannot be empty")
-                message_id = await _send_evolution_api(recipient, text)
+                provider = str(args.get("provider") or settings.whatsapp_provider)
+                session_name = str(
+                    args.get("session")
+                    or (
+                        settings.waha_default_session
+                        if provider == "waha"
+                        else settings.evolution_api_instance
+                    )
+                )
+                message_id = await send_whatsapp(
+                    recipient, text, provider=provider, session=session_name
+                )
+                recorded = await record_whatsapp_outbound(
+                    provider=provider,
+                    session_name=session_name,
+                    phone=recipient,
+                    text=text,
+                    provider_message_id=message_id,
+                    source="human",
+                )
                 return _json_content(
                     {
                         "status": "sent",
                         "channel": "whatsapp",
                         "recipient": recipient,
+                        "provider": provider,
+                        "session": session_name,
                         "provider_message_id": message_id,
+                        **recorded,
                     }
+                )
+
+            if name == "list_whatsapp_sessions":
+                return _json_content({"sessions": await list_waha_sessions()})
+
+            if name == "start_fidelapp_sales_sequence":
+                if args.get("confirm_send") is not True:
+                    raise ValueError("confirm_send must be true")
+                recipient = normalize_benin_phone(str(args.get("number", "")))
+                if not recipient:
+                    raise ValueError("number must be a valid Benin phone number")
+                provider = str(args.get("provider") or "waha")
+                session_name = str(args.get("session") or settings.waha_default_session)
+                return _json_content(
+                    await start_fidelapp_sales_sequence(
+                        phone=recipient,
+                        company_name=str(args.get("company_name", "")).strip(),
+                        provider=provider,
+                        session_name=session_name,
+                    )
+                )
+
+            if name == "resume_fidelapp_sales_sequence":
+                if args.get("confirm") is not True:
+                    raise ValueError("confirm must be true")
+                recipient = normalize_benin_phone(str(args.get("number", "")))
+                if not recipient:
+                    raise ValueError("number must be a valid Benin phone number")
+                provider = str(args.get("provider") or "waha")
+                session_name = str(args.get("session") or settings.waha_default_session)
+                return _json_content(
+                    await resume_fidelapp_sales_sequence(
+                        phone=recipient,
+                        company_name=str(args.get("company_name", "")).strip(),
+                        provider=provider,
+                        session_name=session_name,
+                    )
+                )
+
+            if name == "list_whatsapp_conversations":
+                conversations = await list_whatsapp_conversations(int(args.get("limit", 50)))
+                return _json_content({"count": len(conversations), "conversations": conversations})
+
+            if name == "get_whatsapp_conversation":
+                return _json_content(
+                    await get_whatsapp_conversation(
+                        str(args.get("conversation_id", "")), int(args.get("limit", 100))
+                    )
+                )
+
+            if name == "plan_whatsapp_message":
+                preview = {
+                    "conversation_id": str(args.get("conversation_id", "")),
+                    "text": str(args.get("text", "")).strip(),
+                    "source": str(args.get("source", "")),
+                    "scheduled_at": _optional_datetime(args, "scheduled_at"),
+                }
+                if not preview["text"]:
+                    raise ValueError("text cannot be empty")
+                if args.get("confirm") is not True:
+                    return _json_content({"mode": "preview", **preview})
+                return _json_content(
+                    await plan_whatsapp_message(
+                        conversation_id=preview["conversation_id"],
+                        text=preview["text"],
+                        source=preview["source"],
+                        scheduled_at=preview["scheduled_at"],
+                    )
+                )
+
+            if name == "update_planned_whatsapp_message":
+                if args.get("confirm") is not True:
+                    raise ValueError("confirm must be true")
+                return _json_content(
+                    await update_planned_whatsapp_message(
+                        str(args.get("message_id", "")),
+                        action=str(args.get("action", "")),
+                        scheduled_at=_optional_datetime(args, "scheduled_at"),
+                    )
+                )
+
+            if name == "set_whatsapp_conversation_mode":
+                if args.get("confirm") is not True:
+                    raise ValueError("confirm must be true")
+                automatic_limit = args.get("automatic_message_limit")
+                return _json_content(
+                    await set_whatsapp_conversation_mode(
+                        str(args.get("conversation_id", "")),
+                        mode=str(args.get("mode", "")),
+                        automatic_message_limit=(
+                            int(automatic_limit) if automatic_limit is not None else None
+                        ),
+                    )
                 )
 
             if name == "reply_to_incoming_message":
@@ -578,7 +836,20 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
                 text = str(args.get("text", "")).strip()
                 if not text:
                     raise ValueError("text cannot be empty")
-                message_id = await _send_evolution_api(recipient, text)
+                provider = str(incoming.get("provider") or settings.whatsapp_provider)
+                session_name = str(incoming.get("instance") or "")
+                message_id = await send_whatsapp(
+                    recipient, text, provider=provider, session=session_name
+                )
+                recorded = await record_whatsapp_outbound(
+                    provider=provider,
+                    session_name=session_name,
+                    phone=recipient,
+                    text=text,
+                    provider_message_id=message_id,
+                    source="ai_agent",
+                    incoming_message_id=incoming["id"],
+                )
                 acknowledged = {"acknowledged": 0}
                 if bool(args.get("acknowledge", True)):
                     acknowledged = await acknowledge_incoming_messages([incoming["id"]])
@@ -589,8 +860,11 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
                         "recipient": recipient,
                         "incoming_message_id": incoming["id"],
                         "sender_name": incoming.get("sender_name"),
+                        "provider": provider,
+                        "session": session_name,
                         "company": company or None,
                         "provider_message_id": message_id,
+                        **recorded,
                         **acknowledged,
                     }
                 )
@@ -638,7 +912,12 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
                 return _json_content({"count": len(messages), "messages": messages})
 
             if name == "configure_incoming_webhook":
-                return _json_content(await configure_evolution_webhook())
+                return _json_content(
+                    {
+                        "evolution_api": await configure_evolution_webhook(),
+                        "waha": await configure_waha_webhooks(),
+                    }
+                )
 
             if name == "acknowledge_incoming_messages":
                 message_ids = args.get("message_ids")
@@ -788,11 +1067,7 @@ async def _run_sse() -> None:
                     await _send_json(send, 200, {"status": "ignored"})
                     return
                 result = await save_incoming_message(parsed)
-                conversation = (
-                    await handle_permission_reply(parsed.get("sender_phone"), parsed.get("text"))
-                    if result.get("created")
-                    else {"action": "ignored", "reason": "duplicate message"}
-                )
+                conversation = await advance_incoming_conversation(result, parsed)
                 await _send_json(
                     send,
                     200,
@@ -802,6 +1077,28 @@ async def _run_sse() -> None:
                 await _send_json(send, 400, {"status": "invalid_request", "error": str(exc)})
             except Exception:
                 log.exception("Evolution webhook processing failed")
+                await _send_json(send, 500, {"status": "error"})
+        elif path in {"/webhooks/waha", "/webhooks/waha/"} and method == "POST":
+            if not waha_webhook_request_is_authorized(scope.get("headers", [])):
+                await _send_json(send, 401, {"status": "unauthorized"})
+                return
+            try:
+                payload = await _read_json_body(receive)
+                parsed = parse_waha_message(payload)
+                if parsed is None:
+                    await _send_json(send, 200, {"status": "ignored"})
+                    return
+                result = await save_incoming_message(parsed)
+                conversation = await advance_incoming_conversation(result, parsed)
+                await _send_json(
+                    send,
+                    200,
+                    {"status": "accepted", **result, "conversation": conversation},
+                )
+            except (json.JSONDecodeError, ValueError) as exc:
+                await _send_json(send, 400, {"status": "invalid_request", "error": str(exc)})
+            except Exception:
+                log.exception("WAHA webhook processing failed")
                 await _send_json(send, 500, {"status": "error"})
         elif path in {"/mcp", "/mcp/"}:
             if not _request_is_authorized(scope):
@@ -852,12 +1149,29 @@ async def _run_sse() -> None:
                 log.warning("Evolution inbound webhook is inactive: %s", webhook.get("reason"))
         except Exception as exc:
             log.warning("Could not configure Evolution inbound webhook: %s", exc)
+        try:
+            webhook = await configure_waha_webhooks()
+            if webhook.get("configured"):
+                log.info("WAHA inbound webhooks configured for %s", webhook["sessions"])
+            else:
+                log.warning("WAHA inbound webhook is inactive: %s", webhook.get("reason"))
+        except Exception as exc:
+            log.warning("Could not configure WAHA inbound webhooks: %s", exc)
         dispatcher_task = asyncio.create_task(run_outbound_dispatcher())
+        poller_task = (
+            asyncio.create_task(run_waha_inbound_poller())
+            if settings.waha_polling_enabled
+            else None
+        )
         try:
             await uvicorn.Server(config).serve()
         finally:
             dispatcher_task.cancel()
-            await asyncio.gather(dispatcher_task, return_exceptions=True)
+            tasks = [dispatcher_task]
+            if poller_task:
+                poller_task.cancel()
+                tasks.append(poller_task)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def main() -> None:

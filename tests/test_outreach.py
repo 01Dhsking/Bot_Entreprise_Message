@@ -9,6 +9,7 @@ from enterprise_message_bot.outreach import (
     preview_message,
     render_template,
 )
+from enterprise_message_bot.whatsapp import build_waha_request
 
 
 def test_extract_first_email_from_concatenated_source_value() -> None:
@@ -48,6 +49,23 @@ def test_build_evolution_api_request(monkeypatch) -> None:
         "text": "Bonjour",
         "delay": 123,
         "linkPreview": True,
+    }
+
+
+def test_build_waha_request_selects_sender_session(monkeypatch) -> None:
+    monkeypatch.setattr(outreach.settings, "waha_api_base_url", "https://waha.example.com/")
+    monkeypatch.setattr(outreach.settings, "waha_api_key", SecretStr("secret"))
+
+    endpoint, headers, payload = build_waha_request(
+        "22997000000", "Bonjour", session="commercial-2"
+    )
+
+    assert endpoint == "https://waha.example.com/api/sendText"
+    assert headers["X-Api-Key"] == "secret"
+    assert payload == {
+        "session": "commercial-2",
+        "chatId": "22997000000@c.us",
+        "text": "Bonjour",
     }
 
 

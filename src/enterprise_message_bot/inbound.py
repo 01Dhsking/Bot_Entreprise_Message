@@ -1,4 +1,6 @@
+import asyncio
 import hmac
+import logging
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
@@ -6,8 +8,16 @@ from urllib.parse import quote
 import httpx
 
 from .config import get_settings
+from .repository import (
+    advance_fidelapp_sales_sequence,
+    handle_permission_reply,
+    list_pollable_waha_conversations,
+    save_incoming_message,
+)
+from .whatsapp import list_waha_chat_messages
 
 settings = get_settings()
+log = logging.getLogger(__name__)
 
 
 def _event_name(payload: dict[str, Any]) -> str:
@@ -60,10 +70,7 @@ def parse_evolution_message(payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     remote_jid = str(
-        key.get("remoteJidAlt")
-        or data.get("senderPn")
-        or key.get("remoteJid")
-        or ""
+        key.get("remoteJidAlt") or data.get("senderPn") or key.get("remoteJid") or ""
     ).strip()
     provider_message_id = str(key.get("id") or "").strip()
     if not remote_jid or not provider_message_id:
@@ -75,6 +82,7 @@ def parse_evolution_message(payload: dict[str, Any]) -> dict[str, Any] | None:
     sender_phone = "".join(character for character in jid_user if character.isdigit()) or None
     message_type, text = _first_text(message)
     return {
+        "provider": "evolution_api",
         "instance": str(payload.get("instance") or settings.evolution_api_instance).strip(),
         "provider_message_id": provider_message_id,
         "remote_jid": remote_jid,
@@ -87,6 +95,105 @@ def parse_evolution_message(payload: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def parse_waha_message(payload: dict[str, Any]) -> dict[str, Any] | None:
+    if str(payload.get("event") or "").strip().lower() != "message":
+        return None
+    data = payload.get("payload")
+    if not isinstance(data, dict) or bool(data.get("fromMe")):
+        return None
+    raw_data = data.get("_data") if isinstance(data.get("_data"), dict) else {}
+    key = raw_data.get("key") if isinstance(raw_data.get("key"), dict) else {}
+    remote_jid = str(
+        key.get("remoteJidAlt") or data.get("from") or data.get("chatId") or ""
+    ).strip()
+    provider_message_id = str(data.get("id") or "").strip()
+    if not remote_jid or not provider_message_id:
+        return None
+    if remote_jid.endswith("@g.us") or remote_jid.endswith("@broadcast"):
+        return None
+    sender_phone = "".join(
+        character for character in remote_jid.partition("@")[0] if character.isdigit()
+    )
+    body = data.get("body")
+    return {
+        "provider": "waha",
+        "instance": str(payload.get("session") or settings.waha_default_session).strip(),
+        "provider_message_id": provider_message_id,
+        "remote_jid": remote_jid,
+        "sender_phone": sender_phone or None,
+        "sender_name": str(data.get("pushName") or data.get("notifyName") or "").strip() or None,
+        "message_type": "text" if isinstance(body, str) else "unknown",
+        "text": body.strip() if isinstance(body, str) and body.strip() else None,
+        "received_at": _timestamp(data.get("timestamp")),
+        "raw_payload": payload,
+    }
+
+
+def parse_waha_stored_message(
+    data: dict[str, Any], *, session: str, expected_phone: str
+) -> dict[str, Any] | None:
+    payload = {"event": "message", "session": session, "payload": data}
+    parsed = parse_waha_message(payload)
+    if parsed is None or parsed.get("sender_phone") != expected_phone:
+        return None
+    parsed["remote_jid"] = f"{expected_phone}@c.us"
+    return parsed
+
+
+async def advance_incoming_conversation(
+    result: dict[str, Any], parsed: dict[str, Any]
+) -> dict[str, Any]:
+    if not result.get("created"):
+        return {"action": "ignored", "reason": "duplicate message"}
+    conversation_id = result.get("conversation_id")
+    if conversation_id:
+        sequence = await advance_fidelapp_sales_sequence(str(conversation_id), parsed.get("text"))
+        if sequence.get("reason") != "not a FidelApp sales sequence":
+            return sequence
+    return await handle_permission_reply(
+        parsed.get("sender_phone"),
+        parsed.get("text"),
+        provider=parsed.get("provider"),
+        session_name=parsed.get("instance"),
+    )
+
+
+async def poll_waha_incoming_once() -> int:
+    processed = 0
+    for conversation in await list_pollable_waha_conversations():
+        messages = await list_waha_chat_messages(
+            conversation["phone"], session=conversation["session"]
+        )
+        parsed_messages = []
+        for message in messages:
+            parsed = parse_waha_stored_message(
+                message,
+                session=conversation["session"],
+                expected_phone=conversation["phone"],
+            )
+            if parsed and parsed["received_at"] >= conversation["created_at"]:
+                parsed_messages.append(parsed)
+        for parsed in sorted(parsed_messages, key=lambda item: item["received_at"]):
+            result = await save_incoming_message(parsed)
+            if result.get("created"):
+                await advance_incoming_conversation(result, parsed)
+                processed += 1
+    return processed
+
+
+async def run_waha_inbound_poller() -> None:
+    log.info("Persistent WAHA inbound poller started")
+    while True:
+        try:
+            await poll_waha_incoming_once()
+            await asyncio.sleep(settings.waha_poll_interval_seconds)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("WAHA inbound polling iteration failed")
+            await asyncio.sleep(settings.waha_poll_interval_seconds)
+
+
 def webhook_request_is_authorized(headers: list[tuple[bytes, bytes]]) -> bool:
     expected = settings.resolved_evolution_webhook_secret
     if not expected:
@@ -97,6 +204,15 @@ def webhook_request_is_authorized(headers: list[tuple[bytes, bytes]]) -> bool:
     supplied = bearer.strip() if separator and scheme.lower() == "bearer" else ""
     supplied = supplied or values.get(b"x-evolution-webhook-secret", "").strip()
     return bool(supplied and hmac.compare_digest(supplied, expected))
+
+
+def waha_webhook_request_is_authorized(headers: list[tuple[bytes, bytes]]) -> bool:
+    expected = settings.waha_webhook_secret
+    if not expected or not expected.get_secret_value():
+        return settings.app_environment.strip().lower() == "development"
+    values = {name.lower(): value.decode("latin-1") for name, value in headers}
+    supplied = values.get(b"x-waha-webhook-secret", "").strip()
+    return bool(supplied and hmac.compare_digest(supplied, expected.get_secret_value()))
 
 
 async def configure_evolution_webhook() -> dict[str, Any]:

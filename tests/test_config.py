@@ -23,6 +23,17 @@ def test_evolution_api_provider_is_normalized() -> None:
     assert settings.whatsapp_provider == "evolution_api"
 
 
+def test_waha_provider_and_sessions_are_normalized() -> None:
+    settings = Settings(
+        _env_file=None,
+        whatsapp_provider="WAHA",
+        waha_default_session="commercial-1",
+        waha_sessions="commercial-1, commercial-2,commercial-1",
+    )
+    assert settings.whatsapp_provider == "waha"
+    assert settings.configured_waha_sessions == ["commercial-1", "commercial-2"]
+
+
 def test_database_url_safely_encodes_complex_password() -> None:
     password = "p@ss:/#% with spaces"
     settings = Settings(

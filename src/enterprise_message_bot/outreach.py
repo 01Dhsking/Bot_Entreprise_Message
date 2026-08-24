@@ -6,13 +6,11 @@ from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr
 from typing import Any
-from urllib.parse import quote
-
-import httpx
 
 from .config import get_settings
 from .conversation import permission_opener
 from .repository import complete_contact_attempt, queue_outbound_message, reserve_contact_attempt
+from .whatsapp import build_evolution_request, send_whatsapp, whatsapp_provider_status
 
 settings = get_settings()
 
@@ -49,9 +47,8 @@ def normalize_benin_phone(raw_value: str | None) -> str | None:
         return f"{country_code}{digits[len(national_prefix) :]}"
     if len(digits) == len(country_code) + 8 and digits.startswith(country_code):
         return digits
-    if (
-        len(digits) == len(country_code) + 10
-        and digits.startswith(f"{country_code}{national_prefix}")
+    if len(digits) == len(country_code) + 10 and digits.startswith(
+        f"{country_code}{national_prefix}"
     ):
         return f"{country_code}{digits[len(country_code) + len(national_prefix) :]}"
     if digits.startswith(country_code) and len(digits) >= len(country_code) + 10:
@@ -83,10 +80,6 @@ def provider_status() -> dict[str, Any]:
     smtp_password_configured = bool(
         settings.smtp_password and settings.smtp_password.get_secret_value()
     )
-    evolution_key_configured = bool(
-        settings.evolution_api_key and settings.evolution_api_key.get_secret_value()
-    )
-    evolution_url = settings.evolution_api_base_url or ""
     return {
         "email": {
             "configured": bool(settings.smtp_username and smtp_password_configured),
@@ -94,17 +87,7 @@ def provider_status() -> dict[str, Any]:
             "port": settings.smtp_port,
             "from_email": settings.smtp_from_email,
         },
-        "whatsapp": {
-            "configured": bool(
-                settings.whatsapp_provider == "evolution_api"
-                and evolution_url
-                and evolution_key_configured
-                and settings.evolution_api_instance
-            ),
-            "provider": settings.whatsapp_provider,
-            "instance": settings.evolution_api_instance,
-            "transport_encrypted": evolution_url.lower().startswith("https://"),
-        },
+        "whatsapp": whatsapp_provider_status(),
     }
 
 
@@ -132,30 +115,12 @@ def _send_smtp(recipient: str, subject: str, body: str) -> str:
 
 
 def build_evolution_api_request(recipient: str, body: str) -> tuple[str, dict, dict]:
-    if (
-        settings.whatsapp_provider != "evolution_api"
-        or not settings.evolution_api_base_url
-        or not settings.evolution_api_key
-        or not settings.evolution_api_key.get_secret_value()
-        or not settings.evolution_api_instance
-    ):
+    if settings.whatsapp_provider != "evolution_api":
         raise MissingProviderConfiguration(
             "WhatsApp is disabled. Configure WHATSAPP_PROVIDER=evolution_api, "
             "EVOLUTION_API_BASE_URL, EVOLUTION_API_KEY and EVOLUTION_API_INSTANCE."
         )
-    instance = quote(settings.evolution_api_instance.strip(), safe="")
-    endpoint = f"{settings.evolution_api_base_url.rstrip('/')}/message/sendText/{instance}"
-    headers = {
-        "Content-Type": "application/json",
-        "apikey": settings.evolution_api_key.get_secret_value(),
-    }
-    payload = {
-        "number": recipient,
-        "text": body,
-        "delay": settings.evolution_api_delay_ms,
-        "linkPreview": settings.evolution_api_link_preview,
-    }
-    return endpoint, headers, payload
+    return build_evolution_request(recipient, body)
 
 
 def encode_json_ascii(payload: dict[str, Any]) -> str:
@@ -163,19 +128,7 @@ def encode_json_ascii(payload: dict[str, Any]) -> str:
 
 
 async def _send_evolution_api(recipient: str, body: str) -> str:
-    endpoint, headers, payload = build_evolution_api_request(recipient, body)
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(endpoint, headers=headers, content=encode_json_ascii(payload))
-        response.raise_for_status()
-        data = response.json()
-    key = data.get("key") if isinstance(data, dict) else None
-    key_id = key.get("id") if isinstance(key, dict) else None
-    return str(
-        key_id
-        or (data.get("messageId") if isinstance(data, dict) else None)
-        or (data.get("id") if isinstance(data, dict) else None)
-        or "evolution-api-accepted"
-    )
+    return await send_whatsapp(recipient, body, provider="evolution_api")
 
 
 def preview_message(
@@ -246,6 +199,14 @@ async def send_message(
         body=preview["body"],
         metadata={
             "source_type": company.get("source_type"),
+            "provider": settings.whatsapp_provider if channel == "whatsapp" else None,
+            "session": (
+                settings.waha_default_session
+                if channel == "whatsapp" and settings.whatsapp_provider == "waha"
+                else settings.evolution_api_instance
+                if channel == "whatsapp"
+                else None
+            ),
             "conversation_stage": "opener_queued" if permission_first else None,
             "follow_up_body": preview.get("follow_up_body"),
         },
@@ -261,7 +222,15 @@ async def send_message(
                 recipient=preview["recipient"],
                 body=preview["body"],
                 scheduled_at=scheduled_at,
-                metadata={"conversation_stage": "permission_opener"},
+                metadata={
+                    "conversation_stage": "permission_opener",
+                    "provider": settings.whatsapp_provider,
+                    "session": (
+                        settings.waha_default_session
+                        if settings.whatsapp_provider == "waha"
+                        else settings.evolution_api_instance
+                    ),
+                },
             )
             return {
                 **preview,
@@ -277,7 +246,7 @@ async def send_message(
                 preview["body"],
             )
         else:
-            provider_message_id = await _send_evolution_api(preview["recipient"], preview["body"])
+            provider_message_id = await send_whatsapp(preview["recipient"], preview["body"])
         await complete_contact_attempt(
             attempt_id, success=True, provider_message_id=provider_message_id
         )
