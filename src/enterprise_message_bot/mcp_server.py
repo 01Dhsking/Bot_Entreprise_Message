@@ -66,7 +66,7 @@ settings = get_settings()
 app = Server(settings.app_name)
 log = logging.getLogger(__name__)
 _tool_lock = asyncio.Lock()
-SERVICE_VERSION = "0.5.0"
+SERVICE_VERSION = "0.5.1"
 
 SOURCE_SCHEMA = {
     "type": "string",
@@ -270,8 +270,9 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="start_fidelapp_sales_sequence",
             description=(
-                "Start the approved FidelApp store outreach sequence. Sends only the personalized "
-                "identity opener, then waits for inbound replies before each next step."
+                "Start or cleanly restart the approved FidelApp store outreach sequence. Cancel "
+                "pending automatic steps, send only the personalized identity opener, then wait "
+                "for an inbound reply before every next step."
             ),
             inputSchema={
                 "type": "object",

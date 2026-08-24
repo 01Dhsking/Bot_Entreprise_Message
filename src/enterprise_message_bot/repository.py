@@ -1061,6 +1061,19 @@ async def start_fidelapp_sales_sequence(
             remote_jid=f"{phone}{remote_suffix}",
             phone=phone,
         )
+        cancelled = await session.execute(
+            update(WhatsAppConversationMessage)
+            .where(
+                WhatsAppConversationMessage.conversation_id == conversation.id,
+                WhatsAppConversationMessage.direction == "outgoing",
+                WhatsAppConversationMessage.status.in_({"draft", "scheduled", "sending"}),
+            )
+            .values(
+                status="cancelled",
+                scheduled_at=None,
+                error_message="Superseded by restarted FidelApp sequence",
+            )
+        )
         conversation.mode = "automatic"
         conversation.automatic_message_limit = 3
         conversation.automatic_messages_sent = 0
@@ -1089,6 +1102,7 @@ async def start_fidelapp_sales_sequence(
             "session": session_name,
             "recipient": phone,
             "text": first_message,
+            "cancelled_pending_messages": int(cancelled.rowcount or 0),
         }
 
 

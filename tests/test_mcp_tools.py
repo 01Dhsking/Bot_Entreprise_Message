@@ -26,6 +26,36 @@ async def test_multi_session_conversation_tools_are_exposed() -> None:
     assert tools["send_whatsapp_message"].inputSchema["properties"]["session"]
 
 
+async def test_start_fidelapp_sequence_uses_waha_session(monkeypatch) -> None:
+    captured = {}
+
+    async def fake_start(**kwargs):
+        captured.update(kwargs)
+        return {"status": "scheduled", "message_id": "message-id"}
+
+    monkeypatch.setattr(mcp_server, "start_fidelapp_sales_sequence", fake_start)
+
+    result = await call_tool(
+        "start_fidelapp_sales_sequence",
+        {
+            "number": "0194482118",
+            "company_name": "Boutique Test",
+            "provider": "waha",
+            "session": "default",
+            "confirm_send": True,
+        },
+    )
+
+    payload = json.loads(result[0].text)
+    assert payload["status"] == "scheduled"
+    assert captured == {
+        "phone": "22994482118",
+        "company_name": "Boutique Test",
+        "provider": "waha",
+        "session_name": "default",
+    }
+
+
 async def test_reply_uses_provider_and_session_from_incoming_message(monkeypatch) -> None:
     captured = {}
 
