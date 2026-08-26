@@ -38,9 +38,8 @@ from .outreach import (
 )
 from .registry_client import fetch_registry_page
 from .repository import (
-    ContactBlockedError,
     acknowledge_incoming_messages,
-    get_incoming_message,
+    complete_incoming_reply,
     get_whatsapp_conversation,
     list_companies,
     list_contact_history,
@@ -51,6 +50,7 @@ from .repository import (
     plan_whatsapp_message,
     record_whatsapp_outbound,
     repository_stats,
+    reserve_incoming_reply,
     resume_fidelapp_sales_sequence,
     save_incoming_message,
     save_registry_page,
@@ -247,15 +247,16 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="send_whatsapp_message",
             description=(
-                "Send one direct WhatsApp test message to an explicit phone number. "
-                "This bypasses campaign targeting and does not mark any company as contacted."
+                "Send one short direct WhatsApp message to an explicit phone number. Use at "
+                "most once after reply_to_incoming_message, then wait for a new inbound reply. "
+                "This bypasses campaign targeting and does not mark a company as contacted."
             ),
             inputSchema={
                 "type": "object",
                 "required": ["number", "text", "confirm_send"],
                 "properties": {
                     "number": {"type": "string", "minLength": 6, "maxLength": 40},
-                    "text": {"type": "string", "minLength": 1, "maxLength": 10000},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 240},
                     "provider": {"type": "string", "enum": ["evolution_api", "waha"]},
                     "session": {"type": "string", "minLength": 1, "maxLength": 200},
                     "confirm_send": {"type": "boolean", "const": True},
@@ -387,16 +388,16 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="reply_to_incoming_message",
             description=(
-                "Send a personalized WhatsApp reply to one incoming message and mark that "
-                "incoming message as read after a successful send. Use for human-like agent "
-                "follow-up on interested prospects, questions and objections."
+                "Atomically stop pending automatic replies, switch the conversation to AI, send "
+                "one concise personalized WhatsApp reply and mark the incoming message as read "
+                "after success. A second reply to the same incoming message is rejected."
             ),
             inputSchema={
                 "type": "object",
                 "required": ["message_id", "text", "confirm_send"],
                 "properties": {
                     "message_id": {"type": "string", "format": "uuid"},
-                    "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 240},
                     "confirm_send": {"type": "boolean", "const": True},
                     "acknowledge": {"type": "boolean", "default": True},
                 },
@@ -697,6 +698,8 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
                 text = str(args.get("text", "")).strip()
                 if not text:
                     raise ValueError("text cannot be empty")
+                if len(text) > 240:
+                    raise ValueError("WhatsApp messages must not exceed 240 characters")
                 provider = str(args.get("provider") or settings.whatsapp_provider)
                 session_name = str(
                     args.get("session")
@@ -825,47 +828,51 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
             if name == "reply_to_incoming_message":
                 if args.get("confirm_send") is not True:
                     raise ValueError("confirm_send must be true before sending")
-                incoming = await get_incoming_message(str(args.get("message_id", "")))
-                if incoming is None:
-                    raise ValueError("Incoming message not found")
-                company = incoming.get("company") or {}
-                if company.get("do_not_contact"):
-                    raise ContactBlockedError("This company is marked as do not contact")
-                recipient = normalize_benin_phone(str(incoming.get("sender_phone") or ""))
-                if not recipient:
-                    raise ValueError("incoming message has no valid sender phone")
                 text = str(args.get("text", "")).strip()
                 if not text:
                     raise ValueError("text cannot be empty")
-                provider = str(incoming.get("provider") or settings.whatsapp_provider)
-                session_name = str(incoming.get("instance") or "")
-                message_id = await send_whatsapp(
-                    recipient, text, provider=provider, session=session_name
+                if len(text) > 240:
+                    raise ValueError("WhatsApp replies must not exceed 240 characters")
+                reserved = await reserve_incoming_reply(
+                    str(args.get("message_id", "")), text
                 )
-                recorded = await record_whatsapp_outbound(
-                    provider=provider,
-                    session_name=session_name,
-                    phone=recipient,
-                    text=text,
+                recipient = normalize_benin_phone(str(reserved.get("recipient") or ""))
+                if not recipient:
+                    await complete_incoming_reply(
+                        reserved["reply_id"],
+                        success=False,
+                        error_message="Incoming message has no valid sender phone",
+                    )
+                    raise ValueError("incoming message has no valid sender phone")
+                provider = str(reserved.get("provider") or settings.whatsapp_provider)
+                session_name = str(reserved.get("session") or "")
+                try:
+                    message_id = await send_whatsapp(
+                        recipient, text, provider=provider, session=session_name
+                    )
+                except Exception as exc:
+                    await complete_incoming_reply(
+                        reserved["reply_id"], success=False, error_message=str(exc)
+                    )
+                    raise
+                acknowledged = await complete_incoming_reply(
+                    reserved["reply_id"],
+                    success=True,
                     provider_message_id=message_id,
-                    source="ai_agent",
-                    incoming_message_id=incoming["id"],
+                    acknowledge=bool(args.get("acknowledge", True)),
                 )
-                acknowledged = {"acknowledged": 0}
-                if bool(args.get("acknowledge", True)):
-                    acknowledged = await acknowledge_incoming_messages([incoming["id"]])
                 return _json_content(
                     {
                         "status": "sent",
                         "channel": "whatsapp",
                         "recipient": recipient,
-                        "incoming_message_id": incoming["id"],
-                        "sender_name": incoming.get("sender_name"),
+                        "incoming_message_id": reserved["incoming_message_id"],
+                        "sender_name": reserved.get("sender_name"),
                         "provider": provider,
                         "session": session_name,
-                        "company": company or None,
                         "provider_message_id": message_id,
-                        **recorded,
+                        "conversation_id": reserved["conversation_id"],
+                        "conversation_message_id": reserved["reply_id"],
                         **acknowledged,
                     }
                 )

@@ -7,6 +7,7 @@ from .repository import (
     complete_outbound_message,
     complete_planned_whatsapp_message,
     outbound_dispatch_wait_seconds,
+    planned_whatsapp_message_is_sendable,
 )
 from .whatsapp import send_whatsapp, send_whatsapp_file
 
@@ -28,6 +29,8 @@ async def run_outbound_dispatcher() -> None:
                     await asyncio.sleep(2)
                     continue
                 try:
+                    if not await planned_whatsapp_message_is_sendable(planned["id"]):
+                        continue
                     attachment_path = planned["metadata"].get("attachment_path")
                     if attachment_path:
                         if planned["provider"] != "waha":

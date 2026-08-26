@@ -1,4 +1,5 @@
 import hashlib
+import re
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -24,28 +25,40 @@ from .schemas import RegistryCompany, RegistryPage, parse_registry_date
 
 settings = get_settings()
 
-FIDELAPP_OFFER_MESSAGE = (
-    "Je m'appelle Ulrich, je suis de FidelApp, une société qui aide les boutiques et "
-    "magasins à booster leurs ventes drastiquement. J'ai une offre pour vous, voulez-vous "
-    "l'écouter ?"
-)
-FIDELAPP_PRESENTATION_CAPTION = (
-    "Voici le tout nouvel outil qui marche très bien en ce moment avec les magasins "
-    "avec lesquels nous collaborons déjà.\n\n"
-    "FidelApp est une application mobile disponible sur le store qui vous aide simplement à transformer les clients qui viennent une fois "
-    "chez vous en clients qui reviennent régulièrement."
-    ""
-    "Ceci est un PowerPoint qui explique comment cela vous aide."
-    "C'est quelque chose qui vous intéresse ?, notre équipe est la pour vous aider a le mettre en place"
-)
-
-
 class ContactBlockedError(RuntimeError):
     pass
 
 
 class AlreadyContactedError(ContactBlockedError):
     pass
+
+
+class IncomingAlreadyAnsweredError(RuntimeError):
+    pass
+
+
+def natural_company_name(company_name: str) -> str:
+    normalized = " ".join(company_name.split()).strip()
+    aliases = [value.strip() for value in re.findall(r'["“”]([^"“”]+)["“”]', normalized)]
+    if aliases:
+        normalized = aliases[-1]
+    if normalized.isupper():
+        normalized = normalized.title()
+    return normalized
+
+
+def fidelapp_identity_message(company_name: str) -> str:
+    normalized = company_name.casefold()
+    audience = (
+        "les restaurants"
+        if any(term in normalized for term in ("restaurant", "restauration", "bar ", "café"))
+        else "les commerces"
+    )
+    return (
+        f"Bonjour, ici FidelApp. Nous aidons {audience} à fidéliser leurs clients, à les faire "
+        "revenir plus régulièrement et à mieux communiquer avec eux. Souhaitez-vous une "
+        "présentation gratuite sur place ?"
+    )
 
 
 def company_source_key(company: RegistryCompany) -> str:
@@ -1051,9 +1064,10 @@ async def start_fidelapp_sales_sequence(
     session_name: str,
 ) -> dict[str, Any]:
     remote_suffix = "@c.us" if provider == "waha" else "@s.whatsapp.net"
+    display_name = natural_company_name(company_name)
     first_message = (
-        f"Bonjour, suis-je bien chez {company_name.strip()} ?"
-        if company_name.strip()
+        f"Bonjour, suis-je bien chez {display_name} ?"
+        if display_name
         else "Bonjour, suis-je bien chez vous ?"
     )
     async with SessionFactory() as session:
@@ -1064,6 +1078,23 @@ async def start_fidelapp_sales_sequence(
             remote_jid=f"{phone}{remote_suffix}",
             phone=phone,
         )
+        previous_message = await session.scalar(
+            select(WhatsAppConversationMessage.id)
+            .where(
+                WhatsAppConversationMessage.conversation_id == conversation.id,
+                WhatsAppConversationMessage.status.in_({"sent", "received", "sending"}),
+            )
+            .limit(1)
+        )
+        if previous_message is not None:
+            return {
+                "conversation_id": str(conversation.id),
+                "status": "skipped",
+                "reason": "conversation_already_started",
+                "provider": provider,
+                "session": session_name,
+                "recipient": phone,
+            }
         cancelled = await session.execute(
             update(WhatsAppConversationMessage)
             .where(
@@ -1078,13 +1109,14 @@ async def start_fidelapp_sales_sequence(
             )
         )
         conversation.mode = "automatic"
-        conversation.automatic_message_limit = 3
+        conversation.automatic_message_limit = 2
         conversation.automatic_messages_sent = 0
         conversation.status = "active"
         conversation.metadata_json = {
             "sequence": "fidelapp_sales",
             "stage": "opener_queued",
-            "company_name": company_name.strip() or None,
+            "company_name": display_name or None,
+            "company_name_raw": company_name.strip() or None,
         }
         item = WhatsAppConversationMessage(
             conversation_id=conversation.id,
@@ -1093,7 +1125,10 @@ async def start_fidelapp_sales_sequence(
             status="scheduled",
             text=first_message,
             scheduled_at=datetime.now(UTC),
-            metadata_json={"stage_after_send": "awaiting_identity_reply"},
+            metadata_json={
+                "automatic_sequence": "fidelapp_sales",
+                "stage_after_send": "awaiting_identity_reply",
+            },
         )
         session.add(item)
         await session.commit()
@@ -1172,41 +1207,32 @@ async def advance_fidelapp_sales_sequence(conversation_id: str, text: str | None
                 direction="outgoing",
                 source="prewritten",
                 status="scheduled",
-                text=FIDELAPP_OFFER_MESSAGE,
+                text=fidelapp_identity_message(
+                    str(sequence.get("company_name_raw") or sequence.get("company_name") or "")
+                ),
                 scheduled_at=datetime.now(UTC),
-                metadata_json={"stage_after_send": "awaiting_offer_reply"},
+                metadata_json={
+                    "automatic_sequence": "fidelapp_sales",
+                    "stage_after_send": "awaiting_presentation_consent",
+                },
             )
             session.add(item)
-            sequence["stage"] = "offer_queued"
-            action = "offer_queued"
-        elif stage == "awaiting_offer_reply":
+            sequence["stage"] = "identity_queued"
+            action = "identity_queued"
+        elif stage == "awaiting_presentation_consent":
             if classification == "negative":
                 conversation.mode = "paused"
                 conversation.status = "declined"
-                sequence["stage"] = "offer_declined"
+                sequence["stage"] = "presentation_declined"
                 action = "negative"
             elif classification == "positive":
-                item = WhatsAppConversationMessage(
-                    conversation_id=conversation.id,
-                    direction="outgoing",
-                    source="prewritten",
-                    status="scheduled",
-                    text=FIDELAPP_PRESENTATION_CAPTION,
-                    scheduled_at=datetime.now(UTC),
-                    metadata_json={
-                        "stage_after_send": "awaiting_ai_handoff_reply",
-                        "attachment_path": str(settings.fidelapp_presentation_path),
-                    },
-                )
-                session.add(item)
-                sequence["stage"] = "presentation_queued"
-                action = "presentation_queued"
+                conversation.mode = "ai"
+                sequence["stage"] = "presentation_requested"
+                action = "presentation_requested"
             else:
-                action = "awaiting_clear_offer_reply"
-        elif stage == "awaiting_ai_handoff_reply":
-            conversation.mode = "ai"
-            sequence["stage"] = "ai_active"
-            action = "ai_handoff"
+                conversation.mode = "ai"
+                sequence["stage"] = "ai_active"
+                action = "ai_handoff"
         else:
             return {"action": "ignored", "stage": stage}
         conversation.metadata_json = sequence
@@ -1251,6 +1277,114 @@ async def set_whatsapp_conversation_mode(
         }
 
 
+async def reserve_incoming_reply(message_id: str, text: str) -> dict[str, Any]:
+    normalized_id = uuid.UUID(message_id)
+    async with SessionFactory() as session:
+        incoming = await session.scalar(
+            select(IncomingMessage)
+            .where(IncomingMessage.id == normalized_id)
+            .with_for_update()
+        )
+        if incoming is None:
+            raise ValueError("Incoming message not found")
+        if incoming.company_id:
+            company = await session.get(Company, incoming.company_id)
+            if company and company.do_not_contact:
+                raise ContactBlockedError("This company is marked as do not contact")
+
+        existing_reply = await session.scalar(
+            select(WhatsAppConversationMessage.id)
+            .where(
+                WhatsAppConversationMessage.in_reply_to_message_id == incoming.id,
+                WhatsAppConversationMessage.status.in_({"sending", "sent"}),
+            )
+            .limit(1)
+        )
+        if existing_reply is not None:
+            raise IncomingAlreadyAnsweredError("This incoming message already has a reply")
+
+        conversation = await _get_or_create_conversation(
+            session,
+            provider=incoming.provider,
+            session_name=incoming.instance,
+            remote_jid=incoming.remote_jid,
+            phone=str(incoming.sender_phone or ""),
+            display_name=incoming.sender_name,
+            company_id=incoming.company_id,
+        )
+        sequence = dict(conversation.metadata_json or {})
+        if sequence.get("sequence") == "fidelapp_sales":
+            await session.execute(
+                update(WhatsAppConversationMessage)
+                .where(
+                    WhatsAppConversationMessage.conversation_id == conversation.id,
+                    WhatsAppConversationMessage.direction == "outgoing",
+                    WhatsAppConversationMessage.source == "prewritten",
+                    WhatsAppConversationMessage.status.in_({"draft", "scheduled", "sending"}),
+                )
+                .values(
+                    status="cancelled",
+                    scheduled_at=None,
+                    error_message="Cancelled when AI reply was reserved",
+                )
+            )
+            sequence["stage"] = "ai_active"
+            conversation.metadata_json = sequence
+        conversation.mode = "ai"
+
+        reply = WhatsAppConversationMessage(
+            conversation_id=conversation.id,
+            direction="outgoing",
+            source="ai_agent",
+            status="sending",
+            text=text,
+            in_reply_to_message_id=incoming.id,
+            metadata_json={},
+        )
+        session.add(reply)
+        await session.commit()
+        return {
+            "reply_id": str(reply.id),
+            "conversation_id": str(conversation.id),
+            "incoming_message_id": str(incoming.id),
+            "provider": incoming.provider,
+            "session": incoming.instance,
+            "recipient": str(incoming.sender_phone or ""),
+            "sender_name": incoming.sender_name,
+        }
+
+
+async def complete_incoming_reply(
+    reply_id: str,
+    *,
+    success: bool,
+    provider_message_id: str | None = None,
+    error_message: str | None = None,
+    acknowledge: bool = True,
+) -> dict[str, int]:
+    async with SessionFactory() as session:
+        reply = await session.get(WhatsAppConversationMessage, uuid.UUID(reply_id))
+        if reply is None or reply.source != "ai_agent":
+            raise ValueError("Reserved incoming reply not found")
+        reply.status = "sent" if success else "failed"
+        reply.provider_message_id = provider_message_id
+        reply.error_message = error_message
+        reply.sent_at = datetime.now(UTC) if success else None
+        acknowledged = 0
+        if success and acknowledge and reply.in_reply_to_message_id:
+            result = await session.execute(
+                update(IncomingMessage)
+                .where(
+                    IncomingMessage.id == reply.in_reply_to_message_id,
+                    IncomingMessage.read_at.is_(None),
+                )
+                .values(read_at=datetime.now(UTC))
+            )
+            acknowledged = int(result.rowcount or 0)
+        await session.commit()
+        return {"acknowledged": acknowledged}
+
+
 async def claim_next_planned_whatsapp_message() -> dict[str, Any] | None:
     async with SessionFactory() as session:
         item = await session.scalar(
@@ -1267,6 +1401,23 @@ async def claim_next_planned_whatsapp_message() -> dict[str, Any] | None:
             return None
         conversation = await session.get(WhatsAppConversation, item.conversation_id)
         if conversation is None or conversation.mode == "paused":
+            item.status = "cancelled"
+            item.scheduled_at = None
+            item.error_message = "Conversation is unavailable or paused"
+            await session.commit()
+            return None
+        is_automatic_sequence = (
+            item.source == "prewritten"
+            and (
+                (item.metadata_json or {}).get("automatic_sequence") == "fidelapp_sales"
+                or (conversation.metadata_json or {}).get("sequence") == "fidelapp_sales"
+            )
+        )
+        if is_automatic_sequence and conversation.mode != "automatic":
+            item.status = "cancelled"
+            item.scheduled_at = None
+            item.error_message = "Automatic sequence is no longer active"
+            await session.commit()
             return None
         if (
             item.source == "prewritten"
@@ -1287,6 +1438,32 @@ async def claim_next_planned_whatsapp_message() -> dict[str, Any] | None:
             "body": item.text or "",
             "metadata": dict(item.metadata_json or {}),
         }
+
+
+async def planned_whatsapp_message_is_sendable(message_id: str) -> bool:
+    async with SessionFactory() as session:
+        item = await session.get(WhatsAppConversationMessage, uuid.UUID(message_id))
+        if item is None or item.status != "sending":
+            return False
+        conversation = await session.get(WhatsAppConversation, item.conversation_id)
+        if conversation is None or conversation.mode == "paused":
+            item.status = "cancelled"
+            item.error_message = "Conversation is unavailable or paused"
+            await session.commit()
+            return False
+        is_automatic_sequence = (
+            item.source == "prewritten"
+            and (
+                (item.metadata_json or {}).get("automatic_sequence") == "fidelapp_sales"
+                or (conversation.metadata_json or {}).get("sequence") == "fidelapp_sales"
+            )
+        )
+        if is_automatic_sequence and conversation.mode != "automatic":
+            item.status = "cancelled"
+            item.error_message = "Automatic sequence is no longer active"
+            await session.commit()
+            return False
+        return True
 
 
 async def complete_planned_whatsapp_message(

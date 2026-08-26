@@ -11,6 +11,7 @@ async def test_reply_to_incoming_message_tool_is_exposed() -> None:
     assert "message_id" in tool.inputSchema["required"]
     assert "text" in tool.inputSchema["required"]
     assert tool.inputSchema["properties"]["acknowledge"]["default"] is True
+    assert tool.inputSchema["properties"]["text"]["maxLength"] == 240
 
 
 async def test_multi_session_conversation_tools_are_exposed() -> None:
@@ -59,30 +60,27 @@ async def test_start_fidelapp_sequence_uses_waha_session(monkeypatch) -> None:
 async def test_reply_uses_provider_and_session_from_incoming_message(monkeypatch) -> None:
     captured = {}
 
-    async def fake_incoming(_message_id):
+    async def fake_reserve(_message_id, _text):
         return {
-            "id": "60e8547c-cf47-48dd-91d0-7e85fcb3ef37",
+            "reply_id": "reply-id",
+            "conversation_id": "conversation-id",
+            "incoming_message_id": "60e8547c-cf47-48dd-91d0-7e85fcb3ef37",
             "provider": "waha",
-            "instance": "commercial-2",
-            "sender_phone": "22997000000",
+            "session": "commercial-2",
+            "recipient": "22997000000",
             "sender_name": "Awa",
-            "company": {},
         }
 
     async def fake_send(recipient, text, *, provider, session):
         captured.update(recipient=recipient, text=text, provider=provider, session=session)
         return "waha-message-id"
 
-    async def fake_record(**_kwargs):
-        return {"conversation_id": "conversation-id"}
-
-    async def fake_acknowledge(_message_ids):
+    async def fake_complete(_reply_id, **_kwargs):
         return {"acknowledged": 1}
 
-    monkeypatch.setattr(mcp_server, "get_incoming_message", fake_incoming)
+    monkeypatch.setattr(mcp_server, "reserve_incoming_reply", fake_reserve)
     monkeypatch.setattr(mcp_server, "send_whatsapp", fake_send)
-    monkeypatch.setattr(mcp_server, "record_whatsapp_outbound", fake_record)
-    monkeypatch.setattr(mcp_server, "acknowledge_incoming_messages", fake_acknowledge)
+    monkeypatch.setattr(mcp_server, "complete_incoming_reply", fake_complete)
 
     result = await call_tool(
         "reply_to_incoming_message",

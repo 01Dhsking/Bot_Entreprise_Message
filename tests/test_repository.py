@@ -1,5 +1,28 @@
-from enterprise_message_bot.repository import company_source_key
+from enterprise_message_bot.repository import (
+    company_source_key,
+    fidelapp_identity_message,
+    natural_company_name,
+)
 from enterprise_message_bot.schemas import RegistryCompany
+
+
+def test_natural_company_name_prefers_quoted_trade_name() -> None:
+    assert (
+        natural_company_name('BAR RESTAURANT LA COUR DES GRANDS "BABY JAY"')
+        == "Baby Jay"
+    )
+
+
+def test_fidelapp_identity_message_is_truthful_and_restaurant_specific() -> None:
+    message = fidelapp_identity_message("Bar Restaurant La Cour Des Grands")
+
+    assert "les restaurants" in message
+    assert "fidéliser leurs clients" in message
+    assert "présentation gratuite" in message
+    assert "booster" not in message
+    assert "drastiquement" not in message
+    assert "offre" not in message
+    assert len(message) <= 240
 
 
 def test_company_source_key_is_stable() -> None:
