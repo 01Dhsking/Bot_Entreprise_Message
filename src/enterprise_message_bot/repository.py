@@ -32,8 +32,11 @@ FIDELAPP_OFFER_MESSAGE = (
 FIDELAPP_PRESENTATION_CAPTION = (
     "Voici le tout nouvel outil qui marche très bien en ce moment avec les magasins "
     "avec lesquels nous collaborons déjà.\n\n"
-    "FidelApp vous aide simplement à transformer les clients qui viennent une fois "
+    "FidelApp est une application mobile disponible sur le store qui vous aide simplement à transformer les clients qui viennent une fois "
     "chez vous en clients qui reviennent régulièrement."
+    ""
+    "Ceci est un PowerPoint qui explique comment cela vous aide."
+    "C'est quelque chose qui vous intéresse ?, notre équipe est la pour vous aider a le mettre en place"
 )
 
 
