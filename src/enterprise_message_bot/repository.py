@@ -55,9 +55,9 @@ def fidelapp_identity_message(company_name: str) -> str:
         else "les commerces"
     )
     return (
-        f"Bonjour, ici FidelApp. Nous aidons {audience} à fidéliser leurs clients, à les faire "
-        "revenir plus régulièrement et à mieux communiquer avec eux. Souhaitez-vous une "
-        "présentation gratuite sur place ?"
+        f"Je vous écris de la société FidelApp. Nous aidons {audience} à fidéliser leurs clients, à les faire "
+        "revenir plus régulièrement et à mieux communiquer avec eux. Nous souhaitons vous approcher pour vous présenter notre solution si cela vous intéresse. Nous pensons que ça aura une grande valeur pour votre entreprise et nous serions ravis de vous en parler. Si vous êtes intéressé, nous pouvons organiser un rendez-vous à votre convenance."
+        " notre site c'est https://fidelapp.net si vous voulez savoir plus d'abord, Merci pour votre temps et votre considération."
     )
 
 
