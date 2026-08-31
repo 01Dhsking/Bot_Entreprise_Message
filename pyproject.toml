@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bot-entreprise-message"
-version = "0.5.1"
-description = "MCP server for the InvestBenin company directory"
+version = "0.5.2"
+description = "MCP server for Benin company and individual establishment directories"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.14,<2",

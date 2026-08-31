@@ -27,6 +27,51 @@ async def test_multi_session_conversation_tools_are_exposed() -> None:
     assert tools["send_whatsapp_message"].inputSchema["properties"]["session"]
 
 
+async def test_registry_search_uses_both_client_sources_by_default() -> None:
+    tools = {tool.name: tool for tool in await list_tools()}
+
+    search = tools["search_registry"]
+    assert search.inputSchema["required"] == ["query"]
+    source = search.inputSchema["properties"]["source_type"]
+    assert source["default"] == "all"
+    assert set(source["enum"]) == {"companies", "establishments", "all"}
+
+
+async def test_registry_search_merges_companies_and_establishments(monkeypatch) -> None:
+    requested_sources = []
+
+    class FakeRecord:
+        def __init__(self, source_type: str) -> None:
+            self.source_type = source_type
+
+        def to_dict(self):
+            return {"source_type": self.source_type, "legal_name": self.source_type}
+
+    class FakePage:
+        def __init__(self, source_type: str) -> None:
+            self.companies = [FakeRecord(source_type)]
+
+    async def fake_fetch(source_type, **_kwargs):
+        requested_sources.append(source_type)
+        return FakePage(source_type)
+
+    monkeypatch.setattr(mcp_server, "fetch_registry_page", fake_fetch)
+
+    result = await call_tool(
+        "search_registry",
+        {"query": "restaurant", "save_results": False, "limit": 2},
+    )
+
+    payload = json.loads(result[0].text)
+    assert requested_sources == ["companies", "establishments"]
+    assert payload["source_type"] == "all"
+    assert payload["visible_matches"] == 2
+    assert {record["source_type"] for record in payload["records"]} == {
+        "companies",
+        "establishments",
+    }
+
+
 async def test_start_fidelapp_sequence_uses_waha_session(monkeypatch) -> None:
     captured = {}
 

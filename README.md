@@ -14,7 +14,7 @@ disponible pour diagnostiquer visuellement les portails si leur structure change
 ## Capacites MCP
 
 - `inspect_registry` : lire un echantillon de l'une des deux sources.
-- `search_registry` : rechercher en ligne dans une source et mettre les resultats en cache.
+- `search_registry` : rechercher en ligne dans les deux sources par defaut et mettre les resultats en cache; `source_type` permet de limiter la recherche a une seule source.
 - `collect_registry_pages` : collecter un lot borne de pages; les pages deja stockees sont ignorees.
 - `find_saved_targets` : filtrer sans nouvel appel internet.
 - `preview_targeted_messages` : voir exactement les destinataires et messages sans envoyer.
@@ -27,8 +27,11 @@ disponible pour diagnostiquer visuellement les portails si leur structure change
 - `list_scrape_runs` : auditer les collectes.
 - `health_check` et `close_browser`.
 
-Les filtres locaux disponibles sont la commune, le quartier, l'activite, la date de creation,
-la source, la presence d'un email/telephone et le statut contacte/non contacte.
+Chaque client est soit une societe (`companies`), soit un etablissement individuel
+(`establishments`). Les recherches et filtres utilisent les deux bases par defaut avec
+`source_type=all`. Les filtres locaux disponibles sont la commune, le quartier, l'activite,
+la date de creation, la source, la presence d'un email/telephone et le statut
+contacte/non contacte.
 
 ## Protection anti-doublon
 

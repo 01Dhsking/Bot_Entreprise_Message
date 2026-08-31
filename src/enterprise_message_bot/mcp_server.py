@@ -66,14 +66,22 @@ settings = get_settings()
 app = Server(settings.app_name)
 log = logging.getLogger(__name__)
 _tool_lock = asyncio.Lock()
-SERVICE_VERSION = "0.5.1"
+SERVICE_VERSION = "0.5.2"
 
 SOURCE_SCHEMA = {
     "type": "string",
     "enum": ["companies", "establishments"],
     "description": "companies = societes, establishments = etablissements individuels",
 }
-SOURCE_OR_ALL_SCHEMA = {"type": "string", "enum": ["companies", "establishments", "all"]}
+SOURCE_OR_ALL_SCHEMA = {
+    "type": "string",
+    "enum": ["companies", "establishments", "all"],
+    "default": "all",
+    "description": (
+        "Client source: companies = societes, establishments = etablissements "
+        "individuels, all = both registries"
+    ),
+}
 CHANNEL_SCHEMA = {"type": "string", "enum": ["email", "whatsapp"]}
 
 
@@ -168,12 +176,15 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="search_registry",
-            description="Search online in either the companies or establishments directory.",
+            description=(
+                "Search clients online across both registries by default. Clients are either "
+                "companies (societes) or establishments (etablissements individuels)."
+            ),
             inputSchema={
                 "type": "object",
-                "required": ["source_type", "query"],
+                "required": ["query"],
                 "properties": {
-                    "source_type": SOURCE_SCHEMA,
+                    "source_type": SOURCE_OR_ALL_SCHEMA,
                     "query": {"type": "string", "minLength": 1, "maxLength": 300},
                     "save_results": {"type": "boolean", "default": True},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
@@ -205,8 +216,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="find_saved_targets",
             description=(
-                "Filter cached records by city, district, activity, creation date "
-                "and contact status."
+                "Filter cached clients from both companies and individual establishments by "
+                "city, district, activity, creation date and contact status."
             ),
             inputSchema={"type": "object", "properties": _filter_properties()},
         ),
@@ -656,24 +667,46 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
                 )
 
             if name == "search_registry":
-                source_type = validate_source_type(str(args.get("source_type", "")))
+                source_arg = str(args.get("source_type", "all")).strip().lower()
+                sources = (
+                    list(SOURCE_TYPES)
+                    if source_arg == "all"
+                    else [validate_source_type(source_arg)]
+                )
                 query = str(args.get("query", "")).strip()
-                page = await fetch_registry_page(
-                    source_type, page_number=1, page_size=200, query=query
-                )
-                saved = (
-                    await save_registry_page(page, query=query)
-                    if bool(args.get("save_results", True))
-                    else None
-                )
+                if not query:
+                    raise ValueError("query cannot be empty")
                 limit = min(max(int(args.get("limit", 20)), 1), 200)
+                records_by_source: list[list[dict[str, Any]]] = []
+                source_results: dict[str, Any] = {}
+                for source_type in sources:
+                    page = await fetch_registry_page(
+                        source_type, page_number=1, page_size=200, query=query
+                    )
+                    saved = (
+                        await save_registry_page(page, query=query)
+                        if bool(args.get("save_results", True))
+                        else None
+                    )
+                    source_records = [item.to_dict() for item in page.companies]
+                    source_results[source_type] = {
+                        "visible_matches": len(source_records),
+                        "saved": saved,
+                    }
+                    records_by_source.append(source_records)
+                records = [
+                    source_records[index]
+                    for index in range(max(map(len, records_by_source), default=0))
+                    for source_records in records_by_source
+                    if index < len(source_records)
+                ]
                 return _json_content(
                     {
-                        "source_type": source_type,
+                        "source_type": source_arg,
                         "query": query,
-                        "visible_matches": len(page.companies),
-                        "saved": saved,
-                        "records": [item.to_dict() for item in page.companies[:limit]],
+                        "visible_matches": len(records),
+                        "sources": source_results,
+                        "records": records[:limit],
                     }
                 )
 
