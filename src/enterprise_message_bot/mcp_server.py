@@ -170,7 +170,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "source_type": SOURCE_SCHEMA,
                     "refresh": {"type": "boolean", "default": False},
-                    "sample_size": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+                    "sample_size": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
                 },
             },
         ),
@@ -652,7 +652,7 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
             if name == "inspect_registry":
                 source_type = validate_source_type(str(args.get("source_type", "")))
                 page = await fetch_registry_page(source_type, page_number=1, page_size=20)
-                sample_size = min(max(int(args.get("sample_size", 5)), 1), 20)
+                sample_size = min(max(int(args.get("sample_size", 8)), 1), 20)
                 return _json_content(
                     {
                         "source_type": source_type,
