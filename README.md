@@ -224,3 +224,9 @@ L’ancien outil `start_fidelapp_sales_sequence` est un alias de ce même parcou
 Les autres outils d’envoi sont indépendants : ne pas les utiliser pour prolonger ce template.
 Pendant les essais actuels, seul le numéro **0194482118** est autorisé ; ne pas
 lancer de campagne ni envoyer à un autre numéro sans nouvelle instruction.
+
+Exception de test : le **0194482118** (`22994482118` normalisé) peut relancer
+le template 1 malgré son historique. L’historique est conservé, les étapes
+encore programmées de cette conversation sont annulées et le compteur repart
+à zéro. Cette exception ne s’applique à aucun autre numéro et ne contourne
+pas une demande d’arrêt.

@@ -102,10 +102,43 @@ async def test_existing_campaign_conversation_or_block_skips(monkeypatch, histor
     session = fake_session(monkeypatch, None)
     session.scalar.side_effect = history
     result = await repository.start_fidelapp_sales_sequence(
-        phone="22994482118",
+        phone="22997000000",
         company_name="Magasin Test",
         provider="waha",
         session_name="default",
     )
     assert result["status"] == "skipped"
+    session.add.assert_not_called()
+
+
+async def test_authorized_test_number_can_restart_without_deleting_history(monkeypatch):
+    conversation = SimpleNamespace(id=uuid.uuid4())
+    session = fake_session(monkeypatch, conversation)
+    session.scalar.side_effect = [1, 1, None, 1]
+    get_conversation = AsyncMock(return_value=conversation)
+    monkeypatch.setattr(repository, "_get_or_create_conversation", get_conversation)
+    result = await repository.start_fidelapp_sales_sequence(
+        phone="22994482118",
+        company_name="Boutique Test",
+        provider="waha",
+        session_name="default",
+    )
+    assert result["status"] == "scheduled"
+    assert result["test_recipient"] is True
+    assert conversation.mode == "automatic"
+    assert conversation.automatic_messages_sent == 0
+    session.add.assert_called_once()
+    assert session.add.call_args.args[0].text == "Bonjour, suis-je bien chez Boutique Test ?"
+
+
+async def test_test_number_still_respects_do_not_contact(monkeypatch):
+    session = fake_session(monkeypatch, None)
+    session.scalar.side_effect = [1, 1, 1]
+    result = await repository.start_fidelapp_sales_sequence(
+        phone="22994482118",
+        company_name="Boutique Test",
+        provider="waha",
+        session_name="default",
+    )
+    assert result["reason"] == "do_not_contact"
     session.add.assert_not_called()

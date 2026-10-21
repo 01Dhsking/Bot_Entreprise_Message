@@ -26,6 +26,9 @@ from .schemas import RegistryCompany, RegistryPage, parse_registry_date
 
 settings = get_settings()
 
+# Explicitly authorized sandbox recipient (0194482118), normalized by WhatsApp tools.
+TEMPLATE_1_TEST_PHONE = "22994482118"
+
 
 class ContactBlockedError(RuntimeError):
     pass
@@ -1071,6 +1074,7 @@ async def start_fidelapp_sales_sequence(
     provider: str,
     session_name: str,
 ) -> dict[str, Any]:
+    is_test_recipient = phone == TEMPLATE_1_TEST_PHONE
     remote_suffix = "@c.us" if provider == "waha" else "@s.whatsapp.net"
     display_name = natural_company_name(company_name)
     first_message = (
@@ -1115,7 +1119,9 @@ async def start_fidelapp_sales_sequence(
             )
             .limit(1)
         )
-        if contacted is not None or existing is not None or blocked is not None:
+        if blocked is not None or (
+            not is_test_recipient and (contacted is not None or existing is not None)
+        ):
             return {
                 "status": "skipped",
                 "reason": "do_not_contact" if blocked is not None else "already_contacted",
@@ -1137,7 +1143,7 @@ async def start_fidelapp_sales_sequence(
             )
             .limit(1)
         )
-        if previous_message is not None:
+        if previous_message is not None and not is_test_recipient:
             return {
                 "conversation_id": str(conversation.id),
                 "status": "skipped",
@@ -1167,6 +1173,7 @@ async def start_fidelapp_sales_sequence(
             "sequence": "fidelapp_sales",
             "stage": "opener_queued",
             "template": "template_1",
+            "test_recipient": is_test_recipient,
             "company_name": display_name or None,
             "company_name_raw": company_name.strip() or None,
         }
@@ -1193,6 +1200,7 @@ async def start_fidelapp_sales_sequence(
             "recipient": phone,
             "text": first_message,
             "cancelled_pending_messages": int(cancelled.rowcount or 0),
+            "test_recipient": is_test_recipient,
         }
 
 

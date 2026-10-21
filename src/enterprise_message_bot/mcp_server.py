@@ -285,6 +285,7 @@ async def list_tools() -> list[types.Tool]:
                 "Template 1: fixed store identity question, then fixed FidelApp introduction "
                 "after a reply (except STOP). After message two, human handoff; never AI. "
                 "Skip previously contacted or queued numbers across all sessions/providers. "
+                "Only test number 0194482118 may repeat the template despite prior contacts. "
                 "Use this tool when the user requests template 1."
             ),
             inputSchema={
