@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, desc, exists, func, or_, select, update
+from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
@@ -24,6 +25,7 @@ from .models import (
 from .schemas import RegistryCompany, RegistryPage, parse_registry_date
 
 settings = get_settings()
+
 
 class ContactBlockedError(RuntimeError):
     pass
@@ -55,9 +57,15 @@ def fidelapp_identity_message(company_name: str) -> str:
         else "les commerces"
     )
     return (
-        f"Je vous écris de la société FidelApp. Nous aidons {audience} à fidéliser leurs clients, à les faire "
-        "revenir plus régulièrement et à mieux communiquer avec eux. Nous souhaitons vous approcher pour vous présenter notre solution si cela vous intéresse. Nous pensons que ça aura une grande valeur pour votre entreprise et nous serions ravis de vous en parler. Si vous êtes intéressé, nous pouvons organiser un rendez-vous à votre convenance."
-        " notre site c'est https://fidelapp.net si vous voulez savoir plus d'abord, Merci pour votre temps et votre considération."
+        f'Je vous écris de la société FidelApp. Nous aidons {audience} à fidéliser leurs '
+        f'clients, à les faire '
+        'revenir plus régulièrement et à mieux communiquer avec eux. Nous souhaitons vous'
+        ' approcher pour vous présenter notre solution si cela vous intéresse. Nous '
+        'pensons que ça aura une grande valeur pour votre entreprise et nous serions '
+        'ravis de vous en parler. Si vous êtes intéressé, nous pouvons organiser un '
+        'rendez-vous à votre convenance.'
+        " notre site c'est https://fidelapp.net si vous voulez savoir plus d'abord, Merci"
+        ' pour votre temps et votre considération.'
     )
 
 
@@ -1071,6 +1079,49 @@ async def start_fidelapp_sales_sequence(
         else "Bonjour, suis-je bien chez vous ?"
     )
     async with SessionFactory() as session:
+        # Prevent concurrent starts for the same recipient, even across sessions.
+        await session.execute(
+            sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:phone, 0))"),
+            {"phone": phone},
+        )
+        phones = {phone, f"22901{phone[3:]}"} if len(phone) == 11 else {phone}
+        contacted = await session.scalar(
+            select(ContactAttempt.id)
+            .where(
+                ContactAttempt.channel == "whatsapp",
+                ContactAttempt.recipient.in_(phones),
+                ContactAttempt.status.in_({"sent", "pending"}),
+            )
+            .limit(1)
+        )
+        existing = await session.scalar(
+            select(WhatsAppConversationMessage.id)
+            .join(WhatsAppConversation)
+            .where(
+                WhatsAppConversation.phone.in_(phones),
+                WhatsAppConversationMessage.status.in_(
+                    {"sent", "received", "sending", "scheduled"}
+                ),
+            )
+            .limit(1)
+        )
+        blocked = await session.scalar(
+            select(Company.id)
+            .where(
+                Company.do_not_contact.is_(True),
+                func.regexp_replace(Company.phone, "[^0-9]", "", "g").in_(
+                    phones | {phone[3:], f"01{phone[3:]}"}
+                ),
+            )
+            .limit(1)
+        )
+        if contacted is not None or existing is not None or blocked is not None:
+            return {
+                "status": "skipped",
+                "reason": "do_not_contact" if blocked is not None else "already_contacted",
+                "template": "template_1",
+                "recipient": phone,
+            }
         conversation = await _get_or_create_conversation(
             session,
             provider=provider,
@@ -1115,6 +1166,7 @@ async def start_fidelapp_sales_sequence(
         conversation.metadata_json = {
             "sequence": "fidelapp_sales",
             "stage": "opener_queued",
+            "template": "template_1",
             "company_name": display_name or None,
             "company_name_raw": company_name.strip() or None,
         }
@@ -1180,7 +1232,9 @@ async def resume_fidelapp_sales_sequence(
 
 async def advance_fidelapp_sales_sequence(conversation_id: str, text: str | None) -> dict[str, Any]:
     async with SessionFactory() as session:
-        conversation = await session.get(WhatsAppConversation, uuid.UUID(conversation_id))
+        conversation = await session.get(
+            WhatsAppConversation, uuid.UUID(conversation_id), with_for_update=True
+        )
         if conversation is None:
             return {"action": "ignored", "reason": "conversation not found"}
         sequence = dict(conversation.metadata_json or {})
@@ -1201,6 +1255,8 @@ async def advance_fidelapp_sales_sequence(conversation_id: str, text: str | None
             await session.commit()
             return {"action": "opt_out", "stage": "opted_out"}
 
+        if conversation.mode != "automatic":
+            return {"action": "ignored", "reason": "manual handoff", "stage": stage}
         if stage == "awaiting_identity_reply":
             item = WhatsAppConversationMessage(
                 conversation_id=conversation.id,
@@ -1213,26 +1269,16 @@ async def advance_fidelapp_sales_sequence(conversation_id: str, text: str | None
                 scheduled_at=datetime.now(UTC),
                 metadata_json={
                     "automatic_sequence": "fidelapp_sales",
-                    "stage_after_send": "awaiting_presentation_consent",
+                    "stage_after_send": "completed",
                 },
             )
             session.add(item)
             sequence["stage"] = "identity_queued"
             action = "identity_queued"
-        elif stage == "awaiting_presentation_consent":
-            if classification == "negative":
-                conversation.mode = "paused"
-                conversation.status = "declined"
-                sequence["stage"] = "presentation_declined"
-                action = "negative"
-            elif classification == "positive":
-                conversation.mode = "ai"
-                sequence["stage"] = "presentation_requested"
-                action = "presentation_requested"
-            else:
-                conversation.mode = "ai"
-                sequence["stage"] = "ai_active"
-                action = "ai_handoff"
+        elif stage in {"awaiting_presentation_consent", "completed"}:
+            conversation.mode = "human"
+            sequence["stage"] = "completed"
+            action = "manual_handoff"
         else:
             return {"action": "ignored", "stage": stage}
         conversation.metadata_json = sequence
@@ -1281,9 +1327,7 @@ async def reserve_incoming_reply(message_id: str, text: str) -> dict[str, Any]:
     normalized_id = uuid.UUID(message_id)
     async with SessionFactory() as session:
         incoming = await session.scalar(
-            select(IncomingMessage)
-            .where(IncomingMessage.id == normalized_id)
-            .with_for_update()
+            select(IncomingMessage).where(IncomingMessage.id == normalized_id).with_for_update()
         )
         if incoming is None:
             raise ValueError("Incoming message not found")
@@ -1406,12 +1450,9 @@ async def claim_next_planned_whatsapp_message() -> dict[str, Any] | None:
             item.error_message = "Conversation is unavailable or paused"
             await session.commit()
             return None
-        is_automatic_sequence = (
-            item.source == "prewritten"
-            and (
-                (item.metadata_json or {}).get("automatic_sequence") == "fidelapp_sales"
-                or (conversation.metadata_json or {}).get("sequence") == "fidelapp_sales"
-            )
+        is_automatic_sequence = item.source == "prewritten" and (
+            (item.metadata_json or {}).get("automatic_sequence") == "fidelapp_sales"
+            or (conversation.metadata_json or {}).get("sequence") == "fidelapp_sales"
         )
         if is_automatic_sequence and conversation.mode != "automatic":
             item.status = "cancelled"
@@ -1425,7 +1466,7 @@ async def claim_next_planned_whatsapp_message() -> dict[str, Any] | None:
             and conversation.automatic_messages_sent >= conversation.automatic_message_limit
         ):
             item.status = "draft"
-            conversation.mode = "ai"
+            conversation.mode = "human" if is_automatic_sequence else "ai"
             await session.commit()
             return None
         item.status = "sending"
@@ -1451,12 +1492,9 @@ async def planned_whatsapp_message_is_sendable(message_id: str) -> bool:
             item.error_message = "Conversation is unavailable or paused"
             await session.commit()
             return False
-        is_automatic_sequence = (
-            item.source == "prewritten"
-            and (
-                (item.metadata_json or {}).get("automatic_sequence") == "fidelapp_sales"
-                or (conversation.metadata_json or {}).get("sequence") == "fidelapp_sales"
-            )
+        is_automatic_sequence = item.source == "prewritten" and (
+            (item.metadata_json or {}).get("automatic_sequence") == "fidelapp_sales"
+            or (conversation.metadata_json or {}).get("sequence") == "fidelapp_sales"
         )
         if is_automatic_sequence and conversation.mode != "automatic":
             item.status = "cancelled"
@@ -1501,7 +1539,14 @@ async def complete_planned_whatsapp_message(
             next_stage = (item.metadata_json or {}).get("stage_after_send")
             if conversation and next_stage:
                 sequence = dict(conversation.metadata_json or {})
+                if (
+                    sequence.get("sequence") == "fidelapp_sales"
+                    and next_stage == "awaiting_presentation_consent"
+                ):
+                    next_stage = "completed"
                 sequence["stage"] = next_stage
+                if next_stage == "completed" and sequence.get("sequence") == "fidelapp_sales":
+                    conversation.mode = "human"
                 conversation.metadata_json = sequence
         await session.commit()
 

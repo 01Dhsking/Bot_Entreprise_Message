@@ -280,11 +280,34 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
+            name="template_1",
+            description=(
+                "Template 1: fixed store identity question, then fixed FidelApp introduction "
+                "after a reply (except STOP). After message two, human handoff; never AI. "
+                "Skip previously contacted or queued numbers across all sessions/providers. "
+                "Use this tool when the user requests template 1."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["number", "company_name", "confirm_send"],
+                "properties": {
+                    "number": {"type": "string", "minLength": 6, "maxLength": 40},
+                    "company_name": {"type": "string", "maxLength": 500},
+                    "provider": {
+                        "type": "string",
+                        "enum": ["evolution_api", "waha"],
+                        "default": "waha",
+                    },
+                    "session": {"type": "string", "default": "default", "maxLength": 200},
+                    "confirm_send": {"type": "boolean", "const": True},
+                },
+            },
+        ),
+        types.Tool(
             name="start_fidelapp_sales_sequence",
             description=(
-                "Start or cleanly restart the approved FidelApp store outreach sequence. Cancel "
-                "pending automatic steps, send only the personalized identity opener, then wait "
-                "for an inbound reply before every next step."
+                "Compatibility alias for template_1: two fixed messages then human handoff. "
+                "Skip already contacted numbers; never restart or switch to AI."
             ),
             inputSchema={
                 "type": "object",
@@ -768,7 +791,7 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.T
             if name == "list_whatsapp_sessions":
                 return _json_content({"sessions": await list_waha_sessions()})
 
-            if name == "start_fidelapp_sales_sequence":
+            if name in {"template_1", "start_fidelapp_sales_sequence"}:
                 if args.get("confirm_send") is not True:
                     raise ValueError("confirm_send must be true")
                 recipient = normalize_benin_phone(str(args.get("number", "")))

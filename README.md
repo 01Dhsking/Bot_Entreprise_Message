@@ -203,3 +203,24 @@ pytest
 ruff check .
 docker compose config
 ```
+
+
+## Template 1 (MCP `template_1`)
+
+Lorsque l’utilisateur demande « template 1 », appeler `template_1` avec
+`number`, `company_name`, `confirm_send: true` et éventuellement `provider`/`session`.
+Le nom et le numéro peuvent provenir de la base ; sa simple consultation ne lance aucun envoi.
+
+1. « Bonjour, suis-je bien chez {nom du magasin} ? »
+2. Après une réponse (oui, non ou autre, sauf demande d’arrêt), envoyer le texte
+   FidelApp fixe de `fidelapp_identity_message`, sans le réécrire.
+3. Dès le deuxième envoi réussi, terminer en mode `human`. Aucun troisième message,
+   aucune bascule IA et aucune relance automatique. Le propriétaire reprend sur son téléphone.
+
+Un numéro déjà contacté ou dont un envoi est en attente est ignoré, en vérifiant
+les campagnes et les conversations, toutes sessions et tous fournisseurs confondus.
+Les contacts bloqués sont ignorés. Un démarrage concurrent est sérialisé par numéro.
+L’ancien outil `start_fidelapp_sales_sequence` est un alias de ce même parcours.
+Les autres outils d’envoi sont indépendants : ne pas les utiliser pour prolonger ce template.
+Pendant les essais actuels, seul le numéro **0194482118** est autorisé ; ne pas
+lancer de campagne ni envoyer à un autre numéro sans nouvelle instruction.

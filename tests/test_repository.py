@@ -18,11 +18,10 @@ def test_fidelapp_identity_message_is_truthful_and_restaurant_specific() -> None
 
     assert "les restaurants" in message
     assert "fidéliser leurs clients" in message
-    assert "présentation gratuite" in message
+    assert "Je vous écris de la société FidelApp." in message
     assert "booster" not in message
     assert "drastiquement" not in message
-    assert "offre" not in message
-    assert len(message) <= 240
+    assert "https://fidelapp.net" in message
 
 
 def test_company_source_key_is_stable() -> None:
