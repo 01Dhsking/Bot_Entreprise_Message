@@ -60,15 +60,15 @@ def fidelapp_identity_message(company_name: str) -> str:
         else "les commerces"
     )
     return (
-        f'Je vous écris de la société FidelApp. Nous aidons {audience} à fidéliser leurs '
-        f'clients, à les faire '
-        'revenir plus régulièrement et à mieux communiquer avec eux. Nous souhaitons vous'
-        ' approcher pour vous présenter notre solution si cela vous intéresse. Nous '
-        'pensons que ça aura une grande valeur pour votre entreprise et nous serions '
-        'ravis de vous en parler. Si vous êtes intéressé, nous pouvons organiser un '
-        'rendez-vous à votre convenance.'
+        f"Je vous écris de la société FidelApp. Nous aidons {audience} à fidéliser leurs "
+        f"clients, à les faire "
+        "revenir plus régulièrement et à mieux communiquer avec eux. Nous souhaitons vous"
+        " approcher pour vous présenter notre solution si cela vous intéresse. Nous "
+        "pensons que ça aura une grande valeur pour votre entreprise et nous serions "
+        "ravis de vous en parler. Si vous êtes intéressé, nous pouvons organiser un "
+        "rendez-vous à votre convenance."
         " notre site c'est https://fidelapp.net si vous voulez savoir plus d'abord, Merci"
-        ' pour votre temps et votre considération.'
+        " pour votre temps et votre considération."
     )
 
 
@@ -451,22 +451,44 @@ async def next_whatsapp_campaign_start() -> datetime:
                 OutboundQueueItem.kind == "permission_opener",
             )
         )
-    return max(now, latest + timedelta(seconds=30)) if latest else now
+    return (
+        max(now, latest + timedelta(seconds=campaign_delay_seconds(0, at=latest)))
+        if latest
+        else now
+    )
 
 
 async def outbound_dispatch_wait_seconds() -> float:
     async with SessionFactory() as session:
-        latest_sent = await session.scalar(
+        latest_queue = await session.scalar(
             select(func.max(OutboundQueueItem.sent_at)).where(OutboundQueueItem.status == "sent")
         )
-        sent_count = await session.scalar(
+        queue_count = await session.scalar(
             select(func.count())
             .select_from(OutboundQueueItem)
             .where(OutboundQueueItem.status == "sent")
         )
-    if latest_sent is None:
+        # Template 1 uses the planned-message table, not the campaign queue.
+        latest_planned = await session.scalar(
+            select(func.max(WhatsAppConversationMessage.sent_at)).where(
+                WhatsAppConversationMessage.status == "sent",
+                WhatsAppConversationMessage.source == "prewritten",
+            )
+        )
+        planned_count = await session.scalar(
+            select(func.count())
+            .select_from(WhatsAppConversationMessage)
+            .where(
+                WhatsAppConversationMessage.status == "sent",
+                WhatsAppConversationMessage.source == "prewritten",
+            )
+        )
+    sent_times = [value for value in (latest_queue, latest_planned) if value is not None]
+    if not sent_times:
         return 0
-    required_delay = campaign_delay_seconds(max(int(sent_count or 1) - 1, 0))
+    latest_sent = max(sent_times)
+    sent_count = int(queue_count or 0) + int(planned_count or 0)
+    required_delay = campaign_delay_seconds(max(sent_count - 1, 0), at=latest_sent)
     ready_at = latest_sent + timedelta(seconds=required_delay)
     return max((ready_at - datetime.now(UTC)).total_seconds(), 0)
 

@@ -1,5 +1,6 @@
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -142,3 +143,18 @@ async def test_test_number_still_respects_do_not_contact(monkeypatch):
     )
     assert result["reason"] == "do_not_contact"
     session.add.assert_not_called()
+
+
+async def test_dispatch_paces_template_messages_even_without_campaign_queue(monkeypatch):
+    session = fake_session(monkeypatch, None)
+    latest = datetime.now(UTC) - timedelta(seconds=1)
+    session.scalar.side_effect = [None, 0, latest, 1]
+    wait = await repository.outbound_dispatch_wait_seconds()
+    expected = repository.campaign_delay_seconds(0, at=latest) - 1
+    assert expected - 2 <= wait <= expected
+
+
+async def test_dispatch_no_history_has_no_delay(monkeypatch):
+    session = fake_session(monkeypatch, None)
+    session.scalar.side_effect = [None, 0, None, 0]
+    assert await repository.outbound_dispatch_wait_seconds() == 0

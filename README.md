@@ -230,3 +230,13 @@ le template 1 malgré son historique. L’historique est conservé, les étapes
 encore programmées de cette conversation sont annulées et le compteur repart
 à zéro. Cette exception ne s’applique à aucun autre numéro et ne contourne
 pas une demande d’arrêt.
+
+## Cadence automatique
+
+Les messages automatiques des deux files (campagnes et template 1) sont espacés
+de 30 à 180 secondes, avec une valeur différente selon le message. Le profil
+se renouvelle automatiquement tous les deux puis trois jours, en alternance,
+selon la date au Bénin. Le délai reste stable pendant les vérifications et les
+redémarrages ; aucun délai n’est retiré au sort à chaque passage du dispatcher.
+Le deuxième message attend toujours une réponse, puis la même cadence s’applique.
+L’automatisation quotidienne démarre désormais au plus dix nouveaux contacts.
