@@ -212,24 +212,23 @@ Lorsque l’utilisateur demande « template 1 », appeler `template_1` avec
 Le nom et le numéro peuvent provenir de la base ; sa simple consultation ne lance aucun envoi.
 
 1. « Bonjour, suis-je bien chez {nom du magasin} ? »
-2. Après une réponse (oui, non ou autre, sauf demande d’arrêt), envoyer le texte
-   FidelApp fixe de `fidelapp_identity_message`, sans le réécrire.
-3. Dès le deuxième envoi réussi, terminer en mode `human`. Aucun troisième message,
-   aucune bascule IA et aucune relance automatique. Le propriétaire reprend sur son téléphone.
+2. À la première réponse (oui, non ou autre, sauf demande d’arrêt), attendre deux minutes.
+   En cas de réponse négative, envoyer « Okay d'accord, j'ai dû recevoir des informations
+   erronées, peut-être que votre entreprise a changé de nom. » Puis attendre deux minutes
+   et envoyer la présentation FidelApp fixe. Pour toute autre réponse, envoyer directement
+   cette présentation après le premier délai de deux minutes.
+3. Après la présentation, terminer en mode `human`. Aucune bascule IA ni relance automatique.
+   Le propriétaire reprend sur son téléphone.
 
 Un numéro déjà contacté ou dont un envoi est en attente est ignoré, en vérifiant
 les campagnes et les conversations, toutes sessions et tous fournisseurs confondus.
 Les contacts bloqués sont ignorés. Un démarrage concurrent est sérialisé par numéro.
 L’ancien outil `start_fidelapp_sales_sequence` est un alias de ce même parcours.
 Les autres outils d’envoi sont indépendants : ne pas les utiliser pour prolonger ce template.
-Pendant les essais actuels, seul le numéro **0194482118** est autorisé ; ne pas
-lancer de campagne ni envoyer à un autre numéro sans nouvelle instruction.
-
 Exception de test : le **0194482118** (`22994482118` normalisé) peut relancer
 le template 1 malgré son historique. L’historique est conservé, les étapes
 encore programmées de cette conversation sont annulées et le compteur repart
-à zéro. Cette exception ne s’applique à aucun autre numéro et ne contourne
-pas une demande d’arrêt.
+à zéro. Cette exception ne contourne pas une demande d’arrêt.
 
 ## Cadence automatique
 
@@ -238,5 +237,6 @@ de 30 à 180 secondes, avec une valeur différente selon le message. Le profil
 se renouvelle automatiquement tous les deux puis trois jours, en alternance,
 selon la date au Bénin. Le délai reste stable pendant les vérifications et les
 redémarrages ; aucun délai n’est retiré au sort à chaque passage du dispatcher.
-Le deuxième message attend toujours une réponse, puis la même cadence s’applique.
+Le délai fixe de deux minutes avant chaque réponse de Template 1 est appliqué
+en plus de la cadence générale de la file d’envoi.
 L’automatisation quotidienne démarre désormais au plus dix nouveaux contacts.

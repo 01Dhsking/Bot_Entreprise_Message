@@ -28,6 +28,11 @@ settings = get_settings()
 
 # Explicitly authorized sandbox recipient (0194482118), normalized by WhatsApp tools.
 TEMPLATE_1_TEST_PHONE = "22994482118"
+TEMPLATE_1_REPLY_DELAY = timedelta(minutes=2)
+TEMPLATE_1_NEGATIVE_REPLY = (
+    "Okay d'accord, j'ai dû recevoir des informations erronées, peut-être que votre "
+    "entreprise a changé de nom."
+)
 
 
 class ContactBlockedError(RuntimeError):
@@ -1188,7 +1193,8 @@ async def start_fidelapp_sales_sequence(
             )
         )
         conversation.mode = "automatic"
-        conversation.automatic_message_limit = 2
+        # The negative-answer path may send a clarification before the fixed intro.
+        conversation.automatic_message_limit = 3
         conversation.automatic_messages_sent = 0
         conversation.status = "active"
         conversation.metadata_json = {
@@ -1288,23 +1294,32 @@ async def advance_fidelapp_sales_sequence(conversation_id: str, text: str | None
         if conversation.mode != "automatic":
             return {"action": "ignored", "reason": "manual handoff", "stage": stage}
         if stage == "awaiting_identity_reply":
+            negative = classification == "negative"
             item = WhatsAppConversationMessage(
                 conversation_id=conversation.id,
                 direction="outgoing",
                 source="prewritten",
                 status="scheduled",
-                text=fidelapp_identity_message(
-                    str(sequence.get("company_name_raw") or sequence.get("company_name") or "")
+                text=(
+                    TEMPLATE_1_NEGATIVE_REPLY
+                    if negative
+                    else fidelapp_identity_message(
+                        str(sequence.get("company_name_raw") or sequence.get("company_name") or "")
+                    )
                 ),
-                scheduled_at=datetime.now(UTC),
+                scheduled_at=datetime.now(UTC) + TEMPLATE_1_REPLY_DELAY,
                 metadata_json={
                     "automatic_sequence": "fidelapp_sales",
-                    "stage_after_send": "completed",
+                    "stage_after_send": (
+                        "awaiting_negative_intro" if negative else "completed"
+                    ),
                 },
             )
             session.add(item)
-            sequence["stage"] = "identity_queued"
-            action = "identity_queued"
+            sequence["stage"] = (
+                "negative_clarification_queued" if negative else "identity_queued"
+            )
+            action = sequence["stage"]
         elif stage in {"awaiting_presentation_consent", "completed"}:
             conversation.mode = "human"
             sequence["stage"] = "completed"
@@ -1344,7 +1359,7 @@ async def set_whatsapp_conversation_mode(
             raise ValueError("WhatsApp conversation not found")
         conversation.mode = mode
         if automatic_message_limit is not None:
-            conversation.automatic_message_limit = min(max(automatic_message_limit, 0), 2)
+            conversation.automatic_message_limit = min(max(automatic_message_limit, 0), 3)
         await session.commit()
         return {
             "conversation_id": str(conversation.id),
@@ -1575,6 +1590,29 @@ async def complete_planned_whatsapp_message(
                 ):
                     next_stage = "completed"
                 sequence["stage"] = next_stage
+                if (
+                    sequence.get("sequence") == "fidelapp_sales"
+                    and next_stage == "awaiting_negative_intro"
+                    and conversation.mode == "automatic"
+                ):
+                    company_name = str(
+                        sequence.get("company_name_raw") or sequence.get("company_name") or ""
+                    )
+                    session.add(
+                        WhatsAppConversationMessage(
+                            conversation_id=conversation.id,
+                            direction="outgoing",
+                            source="prewritten",
+                            status="scheduled",
+                            text=fidelapp_identity_message(company_name),
+                            scheduled_at=datetime.now(UTC) + TEMPLATE_1_REPLY_DELAY,
+                            metadata_json={
+                                "automatic_sequence": "fidelapp_sales",
+                                "stage_after_send": "completed",
+                            },
+                        )
+                    )
+                    sequence["stage"] = "negative_intro_queued"
                 if next_stage == "completed" and sequence.get("sequence") == "fidelapp_sales":
                     conversation.mode = "human"
                 conversation.metadata_json = sequence

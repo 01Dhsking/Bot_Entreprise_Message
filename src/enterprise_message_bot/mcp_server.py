@@ -282,8 +282,11 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="template_1",
             description=(
-                "Template 1: fixed store identity question, then fixed FidelApp introduction "
-                "after a reply (except STOP). After message two, human handoff; never AI. "
+                "Template 1: fixed store identity question. After a reply, wait two minutes; "
+                "on a negative answer send the fixed clarification, wait two more minutes, "
+                "then send the fixed FidelApp introduction. Other replies get the introduction "
+                "after the first two-minute wait. STOP opts out. Human handoff after the intro; "
+                "never AI. "
                 "Skip previously contacted or queued numbers across all sessions/providers. "
                 "Only test number 0194482118 may repeat the template despite prior contacts. "
                 "Use this tool when the user requests template 1."
@@ -307,7 +310,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="start_fidelapp_sales_sequence",
             description=(
-                "Compatibility alias for template_1: two fixed messages then human handoff. "
+                "Compatibility alias for template_1: fixed messages with a two-minute delay "
+                "before each reply, then human handoff. "
                 "Skip already contacted numbers; never restart or switch to AI."
             ),
             inputSchema={
@@ -406,8 +410,7 @@ async def list_tools() -> list[types.Tool]:
             name="set_whatsapp_conversation_mode",
             description=(
                 "Choose automatic onboarding, AI-agent, human, or paused mode. "
-                "Automatic onboarding "
-                "is strictly capped at two messages."
+                "Automatic onboarding is capped at three messages."
             ),
             inputSchema={
                 "type": "object",
@@ -415,7 +418,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "conversation_id": {"type": "string", "format": "uuid"},
                     "mode": {"type": "string", "enum": ["automatic", "ai", "human", "paused"]},
-                    "automatic_message_limit": {"type": "integer", "minimum": 0, "maximum": 2},
+                    "automatic_message_limit": {"type": "integer", "minimum": 0, "maximum": 3},
                     "confirm": {"type": "boolean", "const": True},
                 },
             },
