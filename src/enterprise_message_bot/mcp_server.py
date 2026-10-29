@@ -287,6 +287,8 @@ async def list_tools() -> list[types.Tool]:
                 "then send the fixed FidelApp introduction. Other replies get the introduction "
                 "after the first two-minute wait. STOP opts out. Human handoff after the intro; "
                 "never AI. "
+                "Automatic queued messages only send Monday through Saturday, 08:00-18:00 "
+                "Africa/Porto-Novo; items due outside hours wait for the next opening. "
                 "Skip previously contacted or queued numbers across all sessions/providers. "
                 "Only test number 0194482118 may repeat the template despite prior contacts. "
                 "Use this tool when the user requests template 1."
@@ -311,7 +313,8 @@ async def list_tools() -> list[types.Tool]:
             name="start_fidelapp_sales_sequence",
             description=(
                 "Compatibility alias for template_1: fixed messages with a two-minute delay "
-                "before each reply, then human handoff. "
+                "before each reply, then human handoff. Automatic queued messages wait for "
+                "Monday-Saturday, 08:00-18:00 Africa/Porto-Novo. "
                 "Skip already contacted numbers; never restart or switch to AI."
             ),
             inputSchema={

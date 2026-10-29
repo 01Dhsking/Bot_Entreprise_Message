@@ -10,7 +10,13 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from .config import get_settings
-from .conversation import campaign_delay_seconds, classify_permission_reply
+from .conversation import (
+    business_hours_wait_seconds,
+    campaign_delay_seconds,
+    classify_permission_reply,
+    is_business_hours,
+    next_business_opening,
+)
 from .database import SessionFactory
 from .models import (
     Company,
@@ -464,6 +470,7 @@ async def next_whatsapp_campaign_start() -> datetime:
 
 
 async def outbound_dispatch_wait_seconds() -> float:
+    business_wait = business_hours_wait_seconds()
     async with SessionFactory() as session:
         latest_queue = await session.scalar(
             select(func.max(OutboundQueueItem.sent_at)).where(OutboundQueueItem.status == "sent")
@@ -490,15 +497,18 @@ async def outbound_dispatch_wait_seconds() -> float:
         )
     sent_times = [value for value in (latest_queue, latest_planned) if value is not None]
     if not sent_times:
-        return 0
+        return business_wait
     latest_sent = max(sent_times)
     sent_count = int(queue_count or 0) + int(planned_count or 0)
     required_delay = campaign_delay_seconds(max(sent_count - 1, 0), at=latest_sent)
     ready_at = latest_sent + timedelta(seconds=required_delay)
-    return max((ready_at - datetime.now(UTC)).total_seconds(), 0)
+    pacing_wait = max((ready_at - datetime.now(UTC)).total_seconds(), 0)
+    return max(pacing_wait, business_wait)
 
 
 async def claim_next_outbound_message() -> dict[str, Any] | None:
+    if not is_business_hours():
+        return None
     async with SessionFactory() as session:
         item = await session.scalar(
             select(OutboundQueueItem)
@@ -524,6 +534,16 @@ async def claim_next_outbound_message() -> dict[str, Any] | None:
             "provider": (item.metadata_json or {}).get("provider"),
             "session": (item.metadata_json or {}).get("session"),
         }
+
+
+async def defer_claimed_outbound_message(queue_item_id: str) -> None:
+    async with SessionFactory() as session:
+        item = await session.get(OutboundQueueItem, uuid.UUID(queue_item_id))
+        if item is None or item.status != "sending":
+            return
+        item.status = "queued"
+        item.scheduled_at = next_business_opening()
+        await session.commit()
 
 
 async def complete_outbound_message(
@@ -1475,6 +1495,8 @@ async def complete_incoming_reply(
 
 
 async def claim_next_planned_whatsapp_message() -> dict[str, Any] | None:
+    if not is_business_hours():
+        return None
     async with SessionFactory() as session:
         item = await session.scalar(
             select(WhatsAppConversationMessage)
@@ -1544,6 +1566,11 @@ async def planned_whatsapp_message_is_sendable(message_id: str) -> bool:
         if is_automatic_sequence and conversation.mode != "automatic":
             item.status = "cancelled"
             item.error_message = "Automatic sequence is no longer active"
+            await session.commit()
+            return False
+        if not is_business_hours():
+            item.status = "scheduled"
+            item.scheduled_at = next_business_opening()
             await session.commit()
             return False
         return True

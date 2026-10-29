@@ -238,5 +238,14 @@ se renouvelle automatiquement tous les deux puis trois jours, en alternance,
 selon la date au Bénin. Le délai reste stable pendant les vérifications et les
 redémarrages ; aucun délai n’est retiré au sort à chaque passage du dispatcher.
 Le délai fixe de deux minutes avant chaque réponse de Template 1 est appliqué
-en plus de la cadence générale de la file d’envoi.
-L’automatisation quotidienne démarre désormais au plus dix nouveaux contacts.
+en plus de la cadence générale de la file d’envoi. L’automatisation démarre au
+plus dix nouveaux contacts par créneau, soit vingt par jour.
+
+## Plage horaire des envois automatiques
+
+Le dispatcher WhatsApp utilise le fuseau `Africa/Porto-Novo` et n’envoie les
+messages des files automatiques que du lundi au samedi, de 08:00 inclus à 18:00
+exclu. Les réponses qui arrivent la nuit, avant l’ouverture ou le dimanche
+restent en attente et partent à la prochaine ouverture. Le dispatcher s’endort
+hors plage et se réveille à l’ouverture ; cette règle est appliquée dans le
+service, même si la file contient un message dont l’échéance est déjà passée.

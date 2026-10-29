@@ -1,11 +1,13 @@
 import asyncio
 import logging
 
+from .conversation import business_hours_wait_seconds, is_business_hours
 from .repository import (
     claim_next_outbound_message,
     claim_next_planned_whatsapp_message,
     complete_outbound_message,
     complete_planned_whatsapp_message,
+    defer_claimed_outbound_message,
     outbound_dispatch_wait_seconds,
     planned_whatsapp_message_is_sendable,
 )
@@ -18,6 +20,11 @@ async def run_outbound_dispatcher() -> None:
     log.info("Persistent WhatsApp dispatcher started")
     while True:
         try:
+            opening_wait = business_hours_wait_seconds()
+            if opening_wait > 0:
+                await asyncio.sleep(opening_wait)
+                continue
+
             wait_seconds = await outbound_dispatch_wait_seconds()
             if wait_seconds > 0:
                 await asyncio.sleep(min(wait_seconds, 2))
@@ -56,6 +63,9 @@ async def run_outbound_dispatcher() -> None:
                     await complete_planned_whatsapp_message(
                         planned["id"], success=False, error_message=str(exc)
                     )
+                continue
+            if not is_business_hours():
+                await defer_claimed_outbound_message(item["id"])
                 continue
             try:
                 provider_message_id = await send_whatsapp(

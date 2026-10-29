@@ -1,11 +1,15 @@
 import hashlib
 import re
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 MIN_SEND_DELAY_SECONDS = 30
 MAX_SEND_DELAY_SECONDS = 180
 PACING_EPOCH = date(2026, 1, 1)
+BENIN_TIMEZONE = ZoneInfo("Africa/Porto-Novo")
+BUSINESS_OPEN = time(8, 0)
+BUSINESS_CLOSE = time(18, 0)
 
 POSITIVE_REPLY_PATTERN = re.compile(
     r"\b(oui|yes|ok|okay|d[' ]?accord|allez[ -]?y|pourquoi pas|interesse|intéressé|"
@@ -21,6 +25,40 @@ OPT_OUT_PATTERN = re.compile(
     r"\b(stop|désabonne|desabonne|ne (?:me )?contactez plus|retirez[- ]moi)\b",
     re.IGNORECASE,
 )
+
+
+def is_business_hours(at: datetime | None = None) -> bool:
+    current = at or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("business-hours timestamp must include a timezone")
+    local = current.astimezone(BENIN_TIMEZONE)
+    local_time = local.timetz().replace(tzinfo=None)
+    return local.weekday() < 6 and BUSINESS_OPEN <= local_time < BUSINESS_CLOSE
+
+
+def next_business_opening(at: datetime | None = None) -> datetime:
+    current = at or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("business-hours timestamp must include a timezone")
+    local = current.astimezone(BENIN_TIMEZONE)
+    if is_business_hours(current):
+        return current.astimezone(UTC)
+
+    opening_day = local.date()
+    local_time = local.timetz().replace(tzinfo=None)
+    if local.weekday() == 6 or local_time >= BUSINESS_CLOSE:
+        opening_day += timedelta(days=1)
+    while opening_day.weekday() == 6:
+        opening_day += timedelta(days=1)
+    opening = datetime.combine(opening_day, BUSINESS_OPEN, tzinfo=BENIN_TIMEZONE)
+    return opening.astimezone(UTC)
+
+
+def business_hours_wait_seconds(at: datetime | None = None) -> float:
+    current = at or datetime.now(UTC)
+    if is_business_hours(current):
+        return 0.0
+    return max((next_business_opening(current) - current.astimezone(UTC)).total_seconds(), 0.0)
 
 
 def pacing_period(at: datetime) -> int:
