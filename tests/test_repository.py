@@ -16,12 +16,13 @@ def test_natural_company_name_prefers_quoted_trade_name() -> None:
 def test_fidelapp_identity_message_is_truthful_and_restaurant_specific() -> None:
     message = fidelapp_identity_message("Bar Restaurant La Cour Des Grands")
 
-    assert "les restaurants" in message
-    assert "fidéliser leurs clients" in message
-    assert "Je vous écris de la société FidelApp." in message
-    assert "booster" not in message
-    assert "drastiquement" not in message
+    assert message.startswith("Bonjour Monsieur/Madame,\n")
+    assert "entreprise technologique spécialisée dans les solutions digitales" in message
+    assert "récompenser leurs clients après leurs achats" in message
+    assert "Google Play et l'App Store" in message
+    assert "Seriez-vous disponible pour un court échange à votre convenance ?" in message
     assert "https://fidelapp.net" in message
+    assert "Je vous écris de la société FidelApp." not in message
 
 
 def test_company_source_key_is_stable() -> None:

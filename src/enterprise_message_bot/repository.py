@@ -64,22 +64,23 @@ def natural_company_name(company_name: str) -> str:
 
 
 def fidelapp_identity_message(company_name: str) -> str:
-    normalized = company_name.casefold()
-    audience = (
-        "les restaurants"
-        if any(term in normalized for term in ("restaurant", "restauration", "bar ", "café"))
-        else "les commerces"
-    )
     return (
-        f"Je vous écris de la société FidelApp. Nous aidons {audience} à fidéliser leurs "
-        f"clients, à les faire "
-        "revenir plus régulièrement et à mieux communiquer avec eux. Nous souhaitons vous"
-        " approcher pour vous présenter notre solution si cela vous intéresse. Nous "
-        "pensons que ça aura une grande valeur pour votre entreprise et nous serions "
-        "ravis de vous en parler. Si vous êtes intéressé, nous pouvons organiser un "
-        "rendez-vous à votre convenance."
-        " notre site c'est https://fidelapp.net si vous voulez savoir plus d'abord, Merci"
-        " pour votre temps et votre considération."
+        "Bonjour Monsieur/Madame,\n"
+        "Je vous contacte au nom de FidelApp, une entreprise technologique spécialisée "
+        "dans les solutions digitales pour les commerces.\n"
+        "Nous avons développé une application de fidélisation qui permet aux commerces "
+        "de récompenser leurs clients après leurs achats, de leur offrir des cadeaux et "
+        "des avantages, et de les encourager à revenir plus régulièrement.\n"
+        "Notre solution permet également de mieux communiquer avec sa clientèle et de "
+        "développer une relation durable avec ses clients.\n"
+        "L'application est disponible sur Google Play et l'App Store.\n"
+        "Nous souhaiterions vous présenter notre solution et voir comment elle pourrait "
+        "contribuer au développement de votre activité.\n"
+        "Seriez-vous disponible pour un court échange à votre convenance ?\n"
+        "Vous pouvez également découvrir notre solution sur notre site : "
+        "https://fidelapp.net\n"
+        "Merci pour votre attention.\n"
+        "L'équipe FidelApp."
     )
 
 
