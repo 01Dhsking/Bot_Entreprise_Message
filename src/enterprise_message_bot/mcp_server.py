@@ -290,6 +290,8 @@ async def list_tools() -> list[types.Tool]:
                 "Automatic queued messages only send Monday through Saturday, 08:00-18:00 "
                 "Africa/Porto-Novo; items due outside hours wait for the next opening. "
                 "Skip previously contacted or queued numbers across all sessions/providers. "
+                "Require a saved company record with a known creation date on or after "
+                "2020-01-01, except for the explicit test number. "
                 "Only test number 0194482118 may repeat the template despite prior contacts. "
                 "Use this tool when the user requests template 1."
             ),
@@ -315,7 +317,9 @@ async def list_tools() -> list[types.Tool]:
                 "Compatibility alias for template_1: fixed messages with a two-minute delay "
                 "before each reply, then human handoff. Automatic queued messages wait for "
                 "Monday-Saturday, 08:00-18:00 Africa/Porto-Novo. "
-                "Skip already contacted numbers; never restart or switch to AI."
+                "Require a known saved-company creation date of 2020-01-01 or later, except "
+                "for the explicit test number. Skip already contacted numbers; never restart "
+                "or switch to AI."
             ),
             inputSchema={
                 "type": "object",

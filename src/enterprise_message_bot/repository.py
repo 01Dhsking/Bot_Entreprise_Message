@@ -34,6 +34,7 @@ settings = get_settings()
 
 # Explicitly authorized sandbox recipient (0194482118), normalized by WhatsApp tools.
 TEMPLATE_1_TEST_PHONE = "22994482118"
+TEMPLATE_1_MIN_CREATION_DATE = date(2020, 1, 1)
 TEMPLATE_1_REPLY_DELAY = timedelta(minutes=2)
 TEMPLATE_1_NEGATIVE_REPLY = (
     "Okay d'accord, j'ai dû recevoir des informations erronées, peut-être que votre "
@@ -1136,12 +1137,18 @@ async def start_fidelapp_sales_sequence(
             sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:phone, 0))"),
             {"phone": phone},
         )
-        phones = {phone, f"22901{phone[3:]}"} if len(phone) == 11 else {phone}
+        national_number = phone[3:] if phone.startswith("229") else phone
+        phone_forms = {
+            phone,
+            national_number,
+            f"01{national_number}",
+            f"22901{national_number}",
+        }
         contacted = await session.scalar(
             select(ContactAttempt.id)
             .where(
                 ContactAttempt.channel == "whatsapp",
-                ContactAttempt.recipient.in_(phones),
+                ContactAttempt.recipient.in_(phone_forms),
                 ContactAttempt.status.in_({"sent", "pending"}),
             )
             .limit(1)
@@ -1150,7 +1157,7 @@ async def start_fidelapp_sales_sequence(
             select(WhatsAppConversationMessage.id)
             .join(WhatsAppConversation)
             .where(
-                WhatsAppConversation.phone.in_(phones),
+                WhatsAppConversation.phone.in_(phone_forms),
                 WhatsAppConversationMessage.status.in_(
                     {"sent", "received", "sending", "scheduled"}
                 ),
@@ -1162,7 +1169,7 @@ async def start_fidelapp_sales_sequence(
             .where(
                 Company.do_not_contact.is_(True),
                 func.regexp_replace(Company.phone, "[^0-9]", "", "g").in_(
-                    phones | {phone[3:], f"01{phone[3:]}"}
+                    phone_forms
                 ),
             )
             .limit(1)
@@ -1176,6 +1183,26 @@ async def start_fidelapp_sales_sequence(
                 "template": "template_1",
                 "recipient": phone,
             }
+        if not is_test_recipient:
+            creation_dates = (
+                await session.scalars(
+                    select(Company.creation_date).where(
+                        func.regexp_replace(Company.phone, "[^0-9]", "", "g").in_(
+                            phone_forms
+                        )
+                    )
+                )
+            ).all()
+            if not creation_dates or any(
+                created is None or created < TEMPLATE_1_MIN_CREATION_DATE
+                for created in creation_dates
+            ):
+                return {
+                    "status": "skipped",
+                    "reason": "outside_template_1_creation_date_range",
+                    "template": "template_1",
+                    "recipient": phone,
+                }
         conversation = await _get_or_create_conversation(
             session,
             provider=provider,
